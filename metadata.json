@@ -1,0 +1,6 @@
+{
+  "name": "THE CREATORS — Build. Break. On Demand.",
+  "description": "Premium technology and creative engineering studio delivering websites, applications, custom software, video editing, game mods, and graphic design on demand.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

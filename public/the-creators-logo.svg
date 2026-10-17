@@ -1,0 +1,129 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 1000" width="100%" height="100%" aria-label="THE CREATORS Logo">
+  <defs>
+    <!-- Background subtle circular gradient -->
+    <radialGradient id="tc-bg-rad" cx="50%" cy="48%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="92%" stop-color="#f8fafc" />
+      <stop offset="100%" stop-color="#e2e8f0" />
+    </radialGradient>
+
+    <!-- Vibrant Acrylic Blue and Cyan Gradients -->
+    <linearGradient id="tc-t-top-grad" x1="140" y1="360" x2="700" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="15%" stop-color="#1e3a8a" />
+      <stop offset="40%" stop-color="#0284c7" />
+      <stop offset="70%" stop-color="#00e5ff" />
+      <stop offset="90%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#bae6fd" />
+    </linearGradient>
+
+    <linearGradient id="tc-t-stem-grad" x1="440" y1="260" x2="220" y2="780" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#00e5ff" />
+      <stop offset="35%" stop-color="#0284c7" />
+      <stop offset="70%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#090a16" />
+    </linearGradient>
+
+    <linearGradient id="tc-c-loop-grad" x1="520" y1="280" x2="840" y2="760" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#bae6fd" />
+      <stop offset="20%" stop-color="#00e5ff" />
+      <stop offset="50%" stop-color="#2563eb" />
+      <stop offset="80%" stop-color="#1e1b4b" />
+      <stop offset="100%" stop-color="#00d4ff" />
+    </linearGradient>
+
+    <linearGradient id="tc-c-under-grad" x1="260" y1="660" x2="840" y2="660" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="30%" stop-color="#00e5ff" />
+      <stop offset="65%" stop-color="#1d4ed8" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+
+    <!-- Crisp Soft Drop Shadow -->
+    <filter id="tc-soft-shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="6" stdDeviation="12" flood-color="#0284c7" flood-opacity="0.22" />
+    </filter>
+
+    <!-- Path for curved motto text along the bottom -->
+    <path id="tc-bottom-arc-1000" d="M 170 820 A 420 420 0 0 0 830 820" fill="none" />
+  </defs>
+
+  <!-- 1. Pure White Circular Base Disc for Pristine Contrast on Dark and Light Screens -->
+  <circle cx="500" cy="500" r="488" fill="url(#tc-bg-rad)" />
+  <circle cx="500" cy="500" r="488" fill="none" stroke="#cbd5e1" stroke-width="2" />
+
+  <!-- 2. Concentric Orbit Rings and Node Dots in Crisp Charcoal -->
+  <g class="tc-orbit" stroke="#0f172a" opacity="0.9">
+    <!-- Main Outer Orbit Ring -->
+    <circle cx="500" cy="490" r="390" stroke="#0f172a" stroke-width="5" fill="none" />
+    <!-- Secondary Dashed Accent Orbit Ring -->
+    <circle cx="500" cy="490" r="405" stroke="#0f172a" stroke-width="2" stroke-dasharray="14 10" opacity="0.4" fill="none" />
+
+    <!-- Orbital Arcs -->
+    <path d="M 136 560 A 370 370 0 0 0 540 860" stroke="#0f172a" stroke-width="3" opacity="0.5" fill="none" />
+    <path d="M 810 320 A 370 370 0 0 0 700 180" stroke="#0f172a" stroke-width="3" opacity="0.5" fill="none" />
+
+    <!-- Planetary Orbit Nodes Solid Dots -->
+    <circle cx="130" cy="430" r="12" fill="#0f172a" stroke="none" />
+    <circle cx="116" cy="490" r="7" fill="#0f172a" stroke="none" opacity="0.55" />
+    <circle cx="790" cy="250" r="12" fill="#0f172a" stroke="none" />
+    <circle cx="876" cy="530" r="11" fill="#0f172a" stroke="none" />
+    <circle cx="190" cy="690" r="9" fill="#0f172a" stroke="none" />
+    <circle cx="540" cy="860" r="6" fill="#0f172a" stroke="none" opacity="0.7" />
+  </g>
+
+  <!-- 3. Painterly TC Monogram Brush Strokes with Bristle Details -->
+  <g class="tc-monogram" filter="url(#tc-soft-shadow)">
+    <!-- T top horizontal brush sweep underlayer -->
+    <path d="M 164 390 C 210 356, 290 316, 410 276 C 530 236, 620 184, 684 104 C 688 100, 672 144, 624 196 C 560 264, 436 312, 284 352 C 224 368, 184 384, 164 390 Z" fill="#090a16" opacity="0.8" />
+    <!-- Vibrant painted sweep -->
+    <path d="M 176 370 C 230 336, 320 296, 444 256 C 556 220, 636 170, 680 108 C 682 106, 670 148, 616 200 C 544 270, 420 316, 284 352 C 230 366, 196 370, 176 370 Z" fill="url(#tc-t-top-grad)" />
+    <!-- White and cyan bristle highlights -->
+    <path d="M 220 350 C 300 310, 410 272, 520 236 C 590 212, 650 170, 676 120" stroke="#ffffff" stroke-width="5" stroke-linecap="round" fill="none" opacity="0.9" />
+    <path d="M 196 360 C 290 320, 430 276, 560 230 C 620 204, 660 164, 672 136" stroke="#67e8f9" stroke-width="5.5" stroke-linecap="round" fill="none" opacity="0.85" />
+    <path d="M 260 336 C 350 300, 460 264, 580 220" stroke="#bae6fd" stroke-width="3.5" stroke-linecap="round" fill="none" opacity="0.95" />
+    <path d="M 320 316 C 420 284, 520 250, 610 210" stroke="#ffffff" stroke-width="3" stroke-linecap="round" fill="none" opacity="0.9" />
+
+    <!-- T vertical stem brush stroke underlayer -->
+    <path d="M 430 264 C 390 330, 356 420, 324 530 C 296 630, 272 720, 244 780 C 240 788, 250 770, 276 710 C 316 620, 370 480, 450 300 Z" fill="#090a16" opacity="0.85" />
+    <!-- Main stem stroke -->
+    <path d="M 440 260 C 396 330, 360 430, 330 540 C 300 650, 276 740, 248 796 C 244 804, 256 780, 284 716 C 324 624, 384 476, 460 296 Z" fill="url(#tc-t-stem-grad)" />
+    <!-- Stem bristle highlights -->
+    <path d="M 436 280 C 392 356, 356 456, 328 560 C 300 660, 276 740, 256 790" stroke="#38bdf8" stroke-width="7" stroke-linecap="round" fill="none" opacity="0.85" />
+    <path d="M 448 270 C 410 340, 372 440, 344 540 C 316 640, 292 720, 270 770" stroke="#00e5ff" stroke-width="4.5" stroke-linecap="round" fill="none" opacity="0.95" />
+    <path d="M 456 264 C 424 330, 390 420, 360 516" stroke="#ffffff" stroke-width="3.5" stroke-linecap="round" fill="none" opacity="0.9" />
+
+    <!-- C sweeping upper loop underlayer -->
+    <path d="M 676 244 C 750 270, 800 330, 792 410 C 780 480, 724 524, 636 536 C 596 540, 564 516, 584 490 C 650 480, 710 448, 716 390 C 724 336, 680 290, 616 280 C 584 276, 640 240, 676 244 Z" fill="#1e1b4b" opacity="0.65" />
+    <path d="M 664 240 C 744 264, 796 324, 788 404 C 776 476, 720 520, 628 532 C 592 536, 560 512, 580 488 C 644 476, 704 444, 710 388 C 716 332, 676 288, 610 276 C 580 272, 630 236, 664 240 Z" fill="url(#tc-c-loop-grad)" />
+    <!-- C Loop Bristles -->
+    <path d="M 630 272 C 690 276, 744 304, 760 356 C 776 410, 750 460, 680 496" stroke="#38bdf8" stroke-width="6" fill="none" stroke-linecap="round" opacity="0.9" />
+    <path d="M 644 260 C 710 270, 764 310, 772 370 C 780 430, 736 480, 660 510" stroke="#00e5ff" stroke-width="4.5" fill="none" stroke-linecap="round" opacity="0.95" />
+    <path d="M 660 252 C 730 270, 780 320, 784 384" stroke="#ffffff" stroke-width="3.5" fill="none" stroke-linecap="round" opacity="0.9" />
+
+    <!-- C bottom hook and underbelly sweep -->
+    <path d="M 260 660 C 300 750, 400 840, 550 850 C 690 856, 790 780, 840 670 C 846 660, 824 684, 790 730 C 730 804, 640 844, 530 836 C 420 824, 336 750, 284 664 C 276 650, 264 648, 260 660 Z" fill="url(#tc-c-under-grad)" />
+    <path d="M 296 690 C 350 770, 444 832, 550 836 C 660 840, 750 792, 816 710" stroke="#00e5ff" stroke-width="7" fill="none" stroke-linecap="round" opacity="0.85" />
+    <path d="M 320 716 C 380 790, 470 844, 570 844 C 680 844, 770 790, 832 696" stroke="#38bdf8" stroke-width="5" fill="none" stroke-linecap="round" opacity="0.9" />
+    <path d="M 360 750 C 430 812, 510 848, 596 844 C 696 836, 780 780, 836 680" stroke="#bae6fd" stroke-width="3.5" fill="none" stroke-linecap="round" opacity="0.95" />
+  </g>
+
+  <!-- 4. Bold THE CREATORS Text Banner -->
+  <g class="tc-text" transform="rotate(-6 500 660)">
+    <!-- White outer silhouette shadow for razor-sharp legibility -->
+    <text x="500" y="680" text-anchor="middle" font-family="system-ui, -apple-system, 'Plus Jakarta Sans', sans-serif" font-weight="900" font-size="88" letter-spacing="5" stroke="#ffffff" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" fill="#ffffff">
+      THE CREATORS
+    </text>
+    <!-- Crisp Dark Charcoal Letters -->
+    <text x="500" y="680" text-anchor="middle" font-family="system-ui, -apple-system, 'Plus Jakarta Sans', sans-serif" font-weight="900" font-size="88" letter-spacing="5" fill="#0f172a">
+      THE CREATORS
+    </text>
+  </g>
+
+  <!-- 5. Curved Motto: BUILD · BREAK · ON DEMAND along bottom arc -->
+  <text font-family="'JetBrains Mono', ui-monospace, monospace" font-size="24" font-weight="800" letter-spacing="8" fill="#0f172a" opacity="0.9">
+    <textPath href="#tc-bottom-arc-1000" startOffset="50%" text-anchor="middle">
+      BUILD · BREAK · ON DEMAND
+    </textPath>
+  </text>
+</svg>
