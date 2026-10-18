@@ -12,6 +12,8 @@ export type User = {
   createdAt: string;
   passwordHash: string;
   authProvider?: 'email' | 'google';
+  googleId?: string | null;
+  avatarUrl?: string | null;
 };
 
 export type PublicUser = Omit<User, 'passwordHash'>;

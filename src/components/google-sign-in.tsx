@@ -1,9 +1,39 @@
-import { useState } from 'react';
-import { Button, Modal, Field, Input } from './ui';
+import { useState, useEffect, useRef } from 'react';
 import { useToast } from './toast';
 import { store } from '@/lib/store';
-import { useI18n } from '@/lib/i18n';
-import { IconShield, IconCheck, IconArrow } from './icons';
+import { api } from '@/lib/api';
+
+declare global {
+  interface Window {
+    google?: {
+      accounts: {
+        id: {
+          initialize: (config: {
+            client_id: string;
+            callback: (response: { credential?: string; select_by?: string }) => void;
+            auto_select?: boolean;
+            cancel_on_tap_outside?: boolean;
+            context?: string;
+          }) => void;
+          renderButton: (
+            parent: HTMLElement,
+            options: {
+              theme?: 'outline' | 'filled_blue' | 'filled_black';
+              size?: 'large' | 'medium' | 'small';
+              text?: 'signin_with' | 'signup_with' | 'continue_with' | 'signin';
+              shape?: 'rectangular' | 'pill' | 'circle' | 'square';
+              logo_alignment?: 'left' | 'center';
+              width?: string | number;
+              locale?: string;
+            }
+          ) => void;
+          prompt: (notification?: (notification: { isNotDisplayed: () => boolean; isSkippedMoment: () => boolean; getNotDisplayedReason: () => string }) => void) => void;
+          cancel: () => void;
+        };
+      };
+    };
+  }
+}
 
 export function GoogleSignInButton({
   onSuccess,
@@ -11,112 +41,194 @@ export function GoogleSignInButton({
   onSuccess?: () => void;
 }) {
   const { push } = useToast();
-  const { t } = useI18n();
-  const [modalOpen, setModalOpen] = useState(false);
-  const [googleEmail, setGoogleEmail] = useState('');
-  const [googleName, setGoogleName] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [clientId, setClientId] = useState<string | null>(() => {
+    return (typeof import.meta !== 'undefined' && import.meta.env?.VITE_GOOGLE_CLIENT_ID as string) || null;
+  });
+  const [configChecked, setConfigChecked] = useState(false);
+  const [gisLoaded, setGisLoaded] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [configNotice, setConfigNotice] = useState<string | null>(null);
+  const googleBtnContainerRef = useRef<HTMLDivElement>(null);
 
-  const handleStart = () => {
-    // Open interactive Google Identity verification modal
-    setModalOpen(true);
-  };
-
-  const handleSimulatedGoogleAuth = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!googleEmail || !googleEmail.includes('@')) {
-      return push('error', 'Please provide a valid Google account email.');
-    }
-    setBusy(true);
-    try {
-      const res = await store.loginWithGoogle(googleEmail, googleName || googleEmail.split('@')[0]);
-      if (res.success) {
-        push('success', `Signed in with verified Google account: ${googleEmail}`);
-        setModalOpen(false);
-        if (onSuccess) onSuccess();
-      } else {
-        push('error', 'Google authentication could not be completed.');
+  // 1. Fetch Google OAuth configuration from the backend
+  useEffect(() => {
+    let isMounted = true;
+    async function loadConfig() {
+      try {
+        const res = await api<{ ok: boolean; googleClientId: string | null; isConfigured: boolean }>('/api/auth/config');
+        if (isMounted) {
+          if (res?.googleClientId) {
+            setClientId(res.googleClientId);
+          }
+          setConfigChecked(true);
+        }
+      } catch {
+        if (isMounted) {
+          setConfigChecked(true);
+        }
       }
+    }
+    loadConfig();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // 2. Dynamically load official Google Identity Services script
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    if (window.google?.accounts?.id) {
+      setGisLoaded(true);
+      return;
+    }
+
+    const scriptId = 'google-identity-services-script';
+    const existing = document.getElementById(scriptId);
+
+    if (existing) {
+      existing.addEventListener('load', () => setGisLoaded(true));
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.id = scriptId;
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = () => setGisLoaded(true);
+    script.onerror = () => {
+      console.warn('[Google Identity] Failed to load official GIS client library.');
+    };
+    document.head.appendChild(script);
+  }, []);
+
+  // 3. Initialize Google Identity Services when script & clientId are available
+  useEffect(() => {
+    if (!gisLoaded || !clientId || typeof window === 'undefined' || !window.google?.accounts?.id) {
+      return;
+    }
+
+    try {
+      window.google.accounts.id.initialize({
+        client_id: clientId,
+        callback: async (response) => {
+          if (!response?.credential) {
+            push('error', 'Google authentication did not return a valid credential.');
+            return;
+          }
+
+          setLoading(true);
+          try {
+            const result = await store.loginWithGoogleCredential(response.credential);
+            if (result.success && result.user) {
+              push('success', `Welcome, ${result.user.name.split(' ')[0]}! Signed in with Google.`);
+              if (onSuccess) onSuccess();
+            } else {
+              push('error', result.error || 'Google authentication could not be completed.');
+            }
+          } catch (err: any) {
+            push('error', err?.message || 'Network error verifying Google ID token.');
+          } finally {
+            setLoading(false);
+          }
+        },
+        auto_select: false,
+        cancel_on_tap_outside: true,
+      });
+
+      // Render official Google button into container if mounted
+      if (googleBtnContainerRef.current) {
+        googleBtnContainerRef.current.innerHTML = '';
+        window.google.accounts.id.renderButton(googleBtnContainerRef.current, {
+          theme: 'outline',
+          size: 'large',
+          text: 'signin_with',
+          shape: 'rectangular',
+          width: '100%',
+          logo_alignment: 'left',
+        });
+      }
+    } catch (err) {
+      console.warn('[Google Identity Init Error]:', err);
+    }
+  }, [gisLoaded, clientId, onSuccess, push]);
+
+  const handleClick = () => {
+    if (loading) return;
+
+    if (!clientId) {
+      const msg = 'Google Sign-In is awaiting Google Cloud OAuth Client ID configuration. Set GOOGLE_CLIENT_ID (or VITE_GOOGLE_CLIENT_ID) in your environment variables to enable.';
+      setConfigNotice(msg);
+      push('error', 'Google OAuth is not configured. Please set GOOGLE_CLIENT_ID.');
+      return;
+    }
+
+    if (!gisLoaded || !window.google?.accounts?.id) {
+      push('error', 'Google Identity Services library is still loading. Please try again in a moment.');
+      return;
+    }
+
+    try {
+      window.google.accounts.id.prompt((notification) => {
+        if (notification.isNotDisplayed()) {
+          console.info('[Google Identity] OneTap prompt not displayed:', notification.getNotDisplayedReason());
+        }
+      });
     } catch {
-      push('error', 'Google sign-in failed.');
-    } finally {
-      setBusy(false);
+      push('error', 'Could not open Google authentication dialog.');
     }
   };
 
   return (
-    <>
-      <Button
-        type="button"
-        variant="outline"
-        size="lg"
-        onClick={handleStart}
-        className="w-full bg-white !text-slate-900 border-slate-300 hover:!bg-slate-100 font-semibold shadow-sm"
-        aria-label="Continue with Google"
-      >
-        <svg aria-hidden="true" className="h-5 w-5 shrink-0" viewBox="0 0 48 48">
-          <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.05 13.22l7.98 6.19C11.92 13.72 17.47 9.5 24 9.5Z" />
-          <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.92c-.58 2.96-2.26 5.48-4.73 7.18l7.65 5.93c4.46-4.12 7.14-10.2 7.14-17.58Z" />
-          <path fill="#FBBC05" d="M10.03 28.59A14.4 14.4 0 0 1 9.25 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 0 0 0 24c0 3.88.93 7.56 2.57 10.78l7.46-6.19Z" />
-          <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.9-5.87l-7.65-5.93c-2.13 1.43-4.85 2.3-8.25 2.3-6.53 0-12.08-4.22-14.07-10.09l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" />
-        </svg>
-        <span>{t('continueWithGoogle')}</span>
-      </Button>
-
-      <Modal open={modalOpen} onClose={() => setModalOpen(false)} title="Google Sign-In Authentication">
-        <div className="space-y-5">
-          <div className="rounded-xl border border-blue-500/20 bg-blue-500/10 p-4 text-xs text-blue-300">
-            <div className="flex items-center gap-2 font-semibold">
-              <IconShield className="h-4 w-4" />
-              <span>OAuth 2.0 Identity Protocol</span>
+    <div className="w-full space-y-2">
+      {/* Official Google Button Container (Rendered by GIS when client ID is active) */}
+      {clientId && gisLoaded ? (
+        <div className="relative w-full overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm transition hover:border-slate-400">
+          <div
+            ref={googleBtnContainerRef}
+            className="w-full flex justify-center [&>div]:!w-full [&_iframe]:!w-full"
+            style={{ minHeight: '44px' }}
+          />
+          {loading && (
+            <div className="absolute inset-0 flex items-center justify-center bg-white/80 backdrop-blur-xs text-xs font-medium text-slate-800">
+              <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-blue-600 mr-2" />
+              Verifying Google credential...
             </div>
-            <p className="mt-1.5 leading-relaxed text-[var(--color-muted)]">
-              In production, Google OAuth verifies the ID token on the server using Google&apos;s public keys. Client accounts receive client role access only (admin privileges cannot be granted via OAuth).
-            </p>
-          </div>
-
-          <form onSubmit={handleSimulatedGoogleAuth} className="space-y-4">
-            <Field label="Google Account Email">
-              <Input
-                type="email"
-                placeholder="you@gmail.com"
-                value={googleEmail}
-                onChange={(e) => setGoogleEmail(e.target.value)}
-                required
-                autoFocus
-              />
-            </Field>
-            <Field label="Your Name (from Google Profile)">
-              <Input
-                type="text"
-                placeholder="e.g. Alex Morgan"
-                value={googleName}
-                onChange={(e) => setGoogleName(e.target.value)}
-              />
-            </Field>
-
-            <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)] p-3 text-xs text-[var(--color-muted)]">
-              <div className="flex items-center gap-2">
-                <IconCheck className="h-3.5 w-3.5 text-emerald-400" />
-                <span>Zero administrative escalation: Client role only</span>
-              </div>
-              <div className="flex items-center gap-2 mt-1">
-                <IconCheck className="h-3.5 w-3.5 text-emerald-400" />
-                <span>Includes 100 welcome tokens for new registrations</span>
-              </div>
-            </div>
-
-            <div className="flex justify-end gap-3 pt-2">
-              <Button type="button" variant="outline" onClick={() => setModalOpen(false)}>
-                Cancel
-              </Button>
-              <Button type="submit" loading={busy}>
-                Authorize &amp; Continue <IconArrow className="h-4 w-4" />
-              </Button>
-            </div>
-          </form>
+          )}
         </div>
-      </Modal>
-    </>
+      ) : (
+        /* Styled branded fallback button when awaiting configuration or before GIS initializes */
+        <button
+          type="button"
+          onClick={handleClick}
+          disabled={loading}
+          className="relative flex w-full items-center justify-center gap-3 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500/20 active:bg-slate-100 disabled:opacity-60 cursor-pointer"
+          aria-label="Sign in with Google"
+        >
+          {loading ? (
+            <span className="inline-block h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-blue-600" />
+          ) : (
+            <svg aria-hidden="true" className="h-5 w-5 shrink-0" viewBox="0 0 48 48">
+              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.05 13.22l7.98 6.19C11.92 13.72 17.47 9.5 24 9.5Z" />
+              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.92c-.58 2.96-2.26 5.48-4.73 7.18l7.65 5.93c4.46-4.12 7.14-10.2 7.14-17.58Z" />
+              <path fill="#FBBC05" d="M10.03 28.59A14.4 14.4 0 0 1 9.25 24c0-1.59.27-3.13.76-4.59l-7.98-6.19A23.9 23.9 0 0 0 0 24c0 3.88.93 7.56 2.57 10.78l7.46-6.19Z" />
+              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.9-5.87l-7.65-5.93c-2.13 1.43-4.85 2.3-8.25 2.3-6.53 0-12.08-4.22-14.07-10.09l-7.98 6.19C6.51 42.62 14.62 48 24 48Z" />
+            </svg>
+          )}
+          <span>{loading ? 'Verifying with Google...' : 'Sign in with Google'}</span>
+        </button>
+      )}
+
+      {/* Helpful configuration assistance when Google OAuth is not yet configured */}
+      {configNotice && !clientId && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-300">
+          <p className="font-semibold">Google Cloud OAuth Configuration Required</p>
+          <p className="mt-1 text-amber-200/90 leading-relaxed">
+            To enable real Google Sign-In, configure <code className="bg-black/30 px-1 py-0.5 rounded text-amber-100 font-mono">GOOGLE_CLIENT_ID</code> in your server environment and <code className="bg-black/30 px-1 py-0.5 rounded text-amber-100 font-mono">VITE_GOOGLE_CLIENT_ID</code> on the frontend.
+          </p>
+        </div>
+      )}
+    </div>
   );
 }

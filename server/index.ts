@@ -11,21 +11,12 @@ import { isDbConfigured, checkDbConnection } from './db.js';
 // In direct/standalone environments without an internal Nginx proxy (e.g. Render, standard container), listen on PORT.
 // In local dev mode with Vite already listening on 3000, fallback to SERVER_PORT or 5000.
 
-const isProduction =
-  process.env.NODE_ENV === 'production' ||
-  Boolean(process.env.K_SERVICE || process.env.K_REVISION || process.env.CLOUD_RUN_JOB) ||
-  !process.argv[1]?.endsWith('server/index.ts');
-
-const hasNginxProxy = Boolean(process.env.NGINX_PORT || process.env.DEFAULT_APP_PORT || process.env.CONTROL_PLANE_PORT);
+const isCompiledProductionServer = !process.argv[1]?.includes('server/index.ts');
 
 let PORT: number;
 
-if (isProduction) {
-  if (hasNginxProxy) {
-    PORT = Number(process.env.DEFAULT_APP_PORT) || 3000;
-  } else {
-    PORT = Number(process.env.PORT) || 3000;
-  }
+if (isCompiledProductionServer) {
+  PORT = Number(process.env.DEFAULT_APP_PORT) || Number(process.env.PORT) || 3000;
 } else {
   PORT = Number(process.env.SERVER_PORT) || 5000;
 }

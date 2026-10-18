@@ -12,6 +12,7 @@ import type {
   Attachment,
 } from '@/types';
 import { SERVICE_DEFINITIONS } from './service-meta';
+import { api } from './api';
 
 // Keys
 const STORAGE_PREFIX = 'tc_store_v4_';
@@ -297,6 +298,9 @@ class AppStore {
       this.txs = INITIAL_TXS;
       this.logs = INITIAL_LOGS;
     }
+
+    // Proactively validate and sync server-managed persistent session on startup
+    this.checkSession().catch(() => {});
   }
 
   public subscribe(cb: () => void): () => void {
@@ -605,55 +609,62 @@ class AppStore {
     return { success: true };
   }
 
-  // Google OAuth Flow Simulation
-  public async loginWithGoogle(googleEmail: string, googleName: string): Promise<{ success: boolean; user?: PublicUser }> {
-    const cleanEmail = googleEmail.trim().toLowerCase();
-    let user = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
-
-    if (!user) {
-      // Create client via Google
-      const dummyHash = await hashPassword(Math.random().toString(36));
-      user = {
-        id: `usr_g_${Date.now()}`,
-        name: googleName || cleanEmail.split('@')[0],
-        email: cleanEmail,
-        role: 'client', // Google signup never grants admin role
-        tokenBalance: 100,
-        suspended: false,
-        createdAt: new Date().toISOString(),
-        passwordHash: dummyHash,
-        authProvider: 'google',
-      };
-      this.users.unshift(user);
-      this.saveUsers();
-
-      // Welcome transaction
-      this.txs.unshift({
-        id: `tx_${Date.now()}`,
-        clientId: user.id,
-        clientName: user.name,
-        clientEmail: user.email,
-        amount: 100,
-        reason: 'Welcome bonus upon registration to The Creators',
-        createdAt: new Date().toISOString(),
-      });
-      this.saveTxs();
-
-      this.logAudit(cleanEmail, 'auth.google_signup', 'New client account created via verified Google sign-in');
-    } else {
-      if (user.suspended) {
-        return { success: false };
-      }
-      this.logAudit(cleanEmail, 'auth.google_login', 'Client signed in via verified Google identity');
-    }
-
-    const pub = sanitizePublicUser(user);
-    this.sessionUser = pub;
+  // Server-Managed Persistent Session Verification
+  public async checkSession(): Promise<PublicUser | null> {
     try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(pub));
-    } catch {}
-    this.emit();
-    return { success: true, user: pub };
+      const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/me');
+      if (res && res.ok && res.user) {
+        this.sessionUser = res.user;
+        this.emit();
+        return res.user;
+      }
+    } catch {
+      // If server session is rejected/expired, clear frontend session
+      if (this.sessionUser) {
+        this.sessionUser = null;
+        try {
+          localStorage.removeItem(SESSION_KEY);
+        } catch {}
+        this.emit();
+      }
+    }
+    return null;
+  }
+
+  // Production Google OAuth Flow (verifies real ID token with backend)
+  public async loginWithGoogleCredential(
+    credential: string
+  ): Promise<{ success: boolean; user?: PublicUser; error?: string }> {
+    try {
+      const res = await api<{ ok: boolean; user: PublicUser; message?: string }>('/api/auth/google', {
+        method: 'POST',
+        body: JSON.stringify({ credential }),
+      });
+
+      if (res && res.ok && res.user) {
+        this.sessionUser = res.user;
+        // Keep in-memory list synchronized
+        const existing = this.users.find((u) => u.id === res.user.id || u.email.toLowerCase() === res.user.email.toLowerCase());
+        if (!existing) {
+          this.users.unshift({
+            ...res.user,
+            passwordHash: '',
+            authProvider: 'google',
+          });
+          this.saveUsers();
+        } else {
+          Object.assign(existing, res.user);
+          this.saveUsers();
+        }
+        this.logAudit(res.user.email, 'auth.google_login', 'Authenticated via verified Google session');
+        this.emit();
+        return { success: true, user: res.user };
+      }
+      return { success: false, error: 'Google authentication failed.' };
+    } catch (err: any) {
+      const msg = err?.message || 'Google authentication encountered an error.';
+      return { success: false, error: msg };
+    }
   }
 
   // Projects API

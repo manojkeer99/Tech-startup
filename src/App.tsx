@@ -18,8 +18,12 @@ import { ForgotPasswordPage } from '@/pages/forgot-password';
 import { ResetPasswordPage } from '@/pages/reset-password';
 import { DashboardPage } from '@/pages/dashboard';
 import { AdminPage } from '@/pages/admin';
+import { store } from '@/lib/store';
 
 export default function App() {
+  useEffect(() => {
+    store.checkSession().catch(() => {});
+  }, []);
   const [currentPath, setCurrentPath] = useState<string>(() => {
     if (typeof window !== 'undefined') {
       return window.location.pathname || '/';
