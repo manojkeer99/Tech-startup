@@ -20,6 +20,7 @@ const defaultAllowedOrigins = [
     'http://127.0.0.1:3000',
     'http://localhost:5173',
     'http://127.0.0.1:5173',
+    'https://thecreators-studio.vercel.app',
 ];
 if (rawFrontendUrl)
     defaultAllowedOrigins.push(rawFrontendUrl.replace(/\/$/, ''));
@@ -177,20 +178,26 @@ function logAudit(actor, action, detail = null) {
         query('INSERT INTO audit_logs (id, actor, action, detail) VALUES ($1, $2, $3, $4)', [entry.id, actor, action, detail]).catch(() => { });
     }
 }
-function setSessionCookie(res, rawToken) {
+function setSessionCookie(res, rawToken, req) {
+    const isProd = process.env.NODE_ENV === 'production';
+    const origin = req?.headers.origin || '';
+    const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
     res.cookie(SESSION_COOKIE, rawToken, {
         httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        sameSite: isCrossSite ? 'none' : 'lax',
+        secure: isProd || isCrossSite,
         path: '/',
         maxAge: SESSION_DURATION_MS,
     });
 }
-function clearSessionCookie(res) {
+function clearSessionCookie(res, req) {
+    const isProd = process.env.NODE_ENV === 'production';
+    const origin = req?.headers.origin || '';
+    const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
     res.clearCookie(SESSION_COOKIE, {
         httpOnly: true,
-        sameSite: 'lax',
-        secure: process.env.NODE_ENV === 'production',
+        sameSite: isCrossSite ? 'none' : 'lax',
+        secure: isProd || isCrossSite,
         path: '/',
     });
 }
@@ -222,7 +229,7 @@ async function createUserSession(user, req, res) {
         expiresAt: expiresAt.getTime(),
         revoked: false,
     });
-    setSessionCookie(res, rawToken);
+    setSessionCookie(res, rawToken, req);
     return rawToken;
 }
 /**
@@ -764,7 +771,7 @@ app.post('/api/auth/logout', async (req, res) => {
         if (mem)
             mem.revoked = true;
     }
-    clearSessionCookie(res);
+    clearSessionCookie(res, req);
     return res.json({ ok: true, message: 'Logged out successfully.' });
 });
 app.get('/api/auth/me', async (req, res) => {

@@ -24,6 +24,7 @@ const defaultAllowedOrigins = [
   'http://127.0.0.1:3000',
   'http://localhost:5173',
   'http://127.0.0.1:5173',
+  'https://thecreators-studio.vercel.app',
 ];
 
 if (rawFrontendUrl) defaultAllowedOrigins.push(rawFrontendUrl.replace(/\/$/, ''));
@@ -242,21 +243,29 @@ function logAudit(actor: string, action: string, detail: string | null = null) {
   }
 }
 
-function setSessionCookie(res: Response, rawToken: string) {
+function setSessionCookie(res: Response, rawToken: string, req?: Request) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const origin = (req?.headers.origin as string) || '';
+  const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
+
   res.cookie(SESSION_COOKIE, rawToken, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    sameSite: isCrossSite ? 'none' : 'lax',
+    secure: isProd || isCrossSite,
     path: '/',
     maxAge: SESSION_DURATION_MS,
   });
 }
 
-function clearSessionCookie(res: Response) {
+function clearSessionCookie(res: Response, req?: Request) {
+  const isProd = process.env.NODE_ENV === 'production';
+  const origin = (req?.headers.origin as string) || '';
+  const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
+
   res.clearCookie(SESSION_COOKIE, {
     httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',
+    sameSite: isCrossSite ? 'none' : 'lax',
+    secure: isProd || isCrossSite,
     path: '/',
   });
 }
@@ -294,7 +303,7 @@ async function createUserSession(user: ServerUser, req: Request, res: Response):
     revoked: false,
   });
 
-  setSessionCookie(res, rawToken);
+  setSessionCookie(res, rawToken, req);
   return rawToken;
 }
 
@@ -965,7 +974,7 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
     if (mem) mem.revoked = true;
   }
 
-  clearSessionCookie(res);
+  clearSessionCookie(res, req);
   return res.json({ ok: true, message: 'Logged out successfully.' });
 });
 
