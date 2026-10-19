@@ -375,43 +375,24 @@ class AppStore {
       return { success: false, error: 'Email and password are required.' };
     }
 
-    const user = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
-    if (!user) {
-      this.logAudit(cleanEmail, 'auth.login_failed', 'User not found');
-      return { success: false, error: 'Invalid email or password.' };
-    }
-
-    if (user.suspended) {
-      this.logAudit(cleanEmail, 'auth.login_blocked', 'Account suspended');
-      return { success: false, error: 'Your account has been suspended. Please contact support.' };
-    }
-
-    const isMatch = verifyPassword(passwordPlain, user.passwordHash);
-    if (!isMatch) {
-      this.logAudit(cleanEmail, 'auth.login_failed', 'Incorrect password');
-      return { success: false, error: 'Invalid email or password.' };
-    }
-
     try {
-      await fetch('/api/auth/login', {
+      const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
         body: JSON.stringify({ email: cleanEmail, password: passwordPlain }),
       });
-    } catch {
-      // Standalone mode continues
+
+      if (res && res.ok && res.user) {
+        this.sessionUser = res.user;
+        this.logAudit(cleanEmail, 'auth.login_success', `Role: ${res.user.role}`);
+        this.emit();
+        return { success: true, user: res.user };
+      }
+      return { success: false, error: 'Invalid email or password.' };
+    } catch (err: any) {
+      const msg = err?.message || 'Invalid email or password.';
+      this.logAudit(cleanEmail, 'auth.login_failed', msg);
+      return { success: false, error: msg };
     }
-
-    const pub = sanitizePublicUser(user);
-    this.sessionUser = pub;
-    try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(pub));
-    } catch {}
-
-    this.logAudit(cleanEmail, 'auth.login_success', `Role: ${user.role}`);
-    this.emit();
-    return { success: true, user: pub };
   }
 
   public async register(params: {
@@ -434,64 +415,29 @@ class AppStore {
       return { success: false, error: 'Password must be at least 8 characters long.' };
     }
 
-    const existing = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
-    if (existing) {
-      return { success: false, error: 'An account with this email already exists. Try logging in.' };
-    }
-
-    const hashed = await hashPassword(params.passwordPlain);
-    const newUser: User = {
-      id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-      name: cleanName,
-      email: cleanEmail,
-      phone: params.phone?.trim() || null,
-      age: params.age ?? null,
-      role: 'client', // Registration NEVER grants admin role
-      tokenBalance: 100, // 100 welcome bonus tokens
-      suspended: false,
-      createdAt: new Date().toISOString(),
-      passwordHash: hashed,
-      authProvider: 'email',
-    };
-
-    this.users.unshift(newUser);
-    this.saveUsers();
-
-    // Welcome transaction
-    const tx: TokenTransaction = {
-      id: `tx_${Date.now()}`,
-      clientId: newUser.id,
-      clientName: newUser.name,
-      clientEmail: newUser.email,
-      amount: 100,
-      reason: 'Welcome bonus upon registration to The Creators',
-      createdAt: new Date().toISOString(),
-    };
-    this.txs.unshift(tx);
-    this.saveTxs();
-
-    // Welcome notification
-    const notif: Notification = {
-      id: `notif_${Date.now()}`,
-      userId: newUser.id,
-      title: 'Welcome to THE CREATORS',
-      body: 'Your client dashboard is active. 100 welcome tokens have been credited to your wallet.',
-      read: false,
-      createdAt: new Date().toISOString(),
-    };
-    this.notifs.unshift(notif);
-    this.saveNotifs();
-
-    this.logAudit(cleanEmail, 'auth.register', 'New client registered with 100 welcome tokens');
-
-    const pub = sanitizePublicUser(newUser);
-    this.sessionUser = pub;
     try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify(pub));
-    } catch {}
+      const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/register', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: cleanName,
+          email: cleanEmail,
+          password: params.passwordPlain,
+          phone: params.phone?.trim() || null,
+          age: params.age ?? null,
+        }),
+      });
 
-    this.emit();
-    return { success: true, user: pub };
+      if (res && res.ok && res.user) {
+        this.sessionUser = res.user;
+        this.logAudit(cleanEmail, 'auth.register', `Role: ${res.user.role}`);
+        this.emit();
+        return { success: true, user: res.user };
+      }
+      return { success: false, error: 'Registration failed.' };
+    } catch (err: any) {
+      const msg = err?.message || 'Registration failed.';
+      return { success: false, error: msg };
+    }
   }
 
   public async logout() {
@@ -554,31 +500,35 @@ class AppStore {
   // Password Reset Flow
   public async requestPasswordReset(email: string): Promise<{ success: boolean; token?: string; error?: string }> {
     const cleanEmail = email.trim().toLowerCase();
-    const user = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
-    if (!user) {
-      // Don't leak user existence in generic message
+    try {
+      await api<{ ok: boolean; message: string }>('/api/auth/forgot', {
+        method: 'POST',
+        body: JSON.stringify({ email: cleanEmail }),
+      });
       return { success: true };
+    } catch {
+      // Fallback
+      const user = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
+      if (!user) {
+        return { success: true };
+      }
+      const tokenBytes = new Uint8Array(16);
+      crypto.getRandomValues(tokenBytes);
+      const token = Array.from(tokenBytes).map((b) => b.toString(16).padStart(2, '0')).join('');
+      const tokenHash = await hashPassword(token);
+      const resetRecord: PasswordResetToken = {
+        token,
+        tokenHash,
+        email: cleanEmail,
+        userId: user.id,
+        expiresAt: Date.now() + 60 * 60 * 1000,
+        used: false,
+      };
+      this.resets.push(resetRecord);
+      this.saveResets();
+      this.logAudit(cleanEmail, 'auth.password_reset_requested', 'Reset token created (valid 1 hr)');
+      return { success: true, token };
     }
-
-    // Generate secure 32-char hex token
-    const tokenBytes = new Uint8Array(16);
-    crypto.getRandomValues(tokenBytes);
-    const token = Array.from(tokenBytes).map((b) => b.toString(16).padStart(2, '0')).join('');
-    const tokenHash = await hashPassword(token);
-
-    const resetRecord: PasswordResetToken = {
-      token,
-      tokenHash,
-      email: cleanEmail,
-      userId: user.id,
-      expiresAt: Date.now() + 60 * 60 * 1000, // 1 hour expiration
-      used: false,
-    };
-
-    this.resets.push(resetRecord);
-    this.saveResets();
-    this.logAudit(cleanEmail, 'auth.password_reset_requested', 'Reset token created (valid 1 hr)');
-    return { success: true, token };
   }
 
   public async completePasswordReset(token: string, newPlain: string): Promise<{ success: boolean; error?: string }> {
@@ -586,6 +536,21 @@ class AppStore {
       return { success: false, error: 'Password must be at least 8 characters.' };
     }
 
+    try {
+      const res = await api<{ ok: boolean; message: string }>('/api/auth/reset', {
+        method: 'POST',
+        body: JSON.stringify({ token: token.trim(), password: newPlain }),
+      });
+      if (res && res.ok) {
+        return { success: true };
+      }
+    } catch (err: any) {
+      if (err?.message) {
+        return { success: false, error: err.message };
+      }
+    }
+
+    // In-memory fallback
     const record = this.resets.find((r) => r.token === token && !r.used);
     if (!record) {
       return { success: false, error: 'This reset token is invalid or has already been used.' };

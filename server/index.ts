@@ -1,4 +1,7 @@
 import 'dotenv/config';
+import path from 'path';
+import fs from 'fs';
+import express, { type Request, type Response, type NextFunction } from 'express';
 import { app } from './app.js';
 import { runMigrations } from './migrate.js';
 import { isDbConfigured, checkDbConnection } from './db.js';
@@ -40,6 +43,27 @@ async function bootstrap() {
   } else {
     console.info('[Database] DATABASE_URL is not set. Operating in resilient standalone mode.');
   }
+
+  // Serve frontend static build in production deployment if dist exists
+  const distPath = path.resolve(process.cwd(), 'dist');
+  if (fs.existsSync(distPath)) {
+    app.use(express.static(distPath));
+    app.get('*', (req: Request, res: Response, next: NextFunction) => {
+      if (req.path.startsWith('/api')) {
+        return next();
+      }
+      const indexPath = path.join(distPath, 'index.html');
+      if (fs.existsSync(indexPath)) {
+        return res.sendFile(indexPath);
+      }
+      return next();
+    });
+  }
+
+  // Fallback 404 for any remaining unhandled non-API paths
+  app.use((_req: Request, res: Response) => {
+    res.status(404).send('Not Found');
+  });
 
   // Start Express listener
   const server = app.listen(PORT, '0.0.0.0', () => {

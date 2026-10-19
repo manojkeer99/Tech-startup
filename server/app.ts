@@ -6,7 +6,7 @@ import bcrypt from 'bcryptjs';
 import path from 'path';
 import fs from 'fs';
 import { OAuth2Client } from 'google-auth-library';
-import { checkDbConnection, isDbConfigured, query } from './db.js';
+import { checkDbConnection, isDbConfigured, query, pool } from './db.js';
 
 export const app = express();
 
@@ -88,6 +88,14 @@ app.use(checkCsrf);
 // Session Cookie Name & Lifetime (30 days persistent session)
 const SESSION_COOKIE = 'tc_session';
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+
+// Trusted administrator emails provisioned exclusively via server-side configuration
+// Rule: Public registration and Google Sign-In can NEVER grant admin privileges to an unverified email.
+export const TRUSTED_ADMIN_EMAILS: string[] = [
+  'thecreators.pvt.ltd@gmail.com',
+  ...(process.env.ADMIN_EMAILS ? process.env.ADMIN_EMAILS.split(',').map((e) => e.trim().toLowerCase()) : []),
+  ...(process.env.ADMIN_EMAIL ? [process.env.ADMIN_EMAIL.trim().toLowerCase()] : []),
+].filter(Boolean);
 
 export interface ServerUser {
   id: string;
@@ -623,18 +631,32 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
           logAudit(cleanEmail, 'auth.google_login_blocked', 'Suspended account attempted Google sign-in');
           return res.status(403).json({ error: 'This account has been suspended. Please contact support.' });
         }
+
+        // Strict verification: Verify admin role against server TRUSTED_ADMIN_EMAILS
+        let validatedRole = row.role as 'client' | 'admin';
+        if (validatedRole === 'admin') {
+          const isExplicitAdmin = TRUSTED_ADMIN_EMAILS.includes(cleanEmail);
+          if (!isExplicitAdmin) {
+            logAudit(cleanEmail, 'security.admin_elevation_blocked', 'Google identity has admin role in DB but email is not in TRUSTED_ADMIN_EMAILS; forcing client role');
+            console.warn(`[Security Alert] Non-whitelisted Google login attempted admin session: ${cleanEmail}`);
+            validatedRole = 'client';
+            await query("UPDATE users SET role = 'client' WHERE id = $1", [row.id]).catch(() => {});
+          }
+        }
+
         // Update avatar if not present
         if (!row.avatar_url && avatarUrl) {
           await query('UPDATE users SET avatar_url = $1 WHERE id = $2', [avatarUrl, row.id]).catch(() => {});
           row.avatar_url = avatarUrl;
         }
+
         user = {
           id: row.id,
           name: row.name,
           email: row.email,
           phone: row.phone,
           age: row.age,
-          role: row.role as 'client' | 'admin',
+          role: validatedRole,
           tokenBalance: row.token_balance,
           suspended: Boolean(row.suspended),
           googleId: row.google_id,
@@ -642,7 +664,7 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
           createdAt: new Date(row.created_at).toISOString(),
           passwordHash: row.password_hash,
         };
-        logAudit(cleanEmail, 'auth.google_login', `Logged in via verified Google identity`);
+        logAudit(cleanEmail, 'auth.google_login', `Logged in via verified Google identity (${validatedRole})`);
       } else {
         // 2. Safe account linking: Check if an existing account with the same verified email exists
         const byEmail = await query<{
@@ -666,18 +688,41 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
             logAudit(cleanEmail, 'auth.google_login_blocked', 'Suspended account attempted Google sign-in');
             return res.status(403).json({ error: 'This account has been suspended. Please contact support.' });
           }
-          // Safely link Google identity without modifying existing password hash, role, or balance
+
+          // CRITICAL SECURITY RULE:
+          // An email match alone MUST NOT automatically link to an Administrator account!
+          if (row.role === 'admin') {
+            const isExplicitAdmin = TRUSTED_ADMIN_EMAILS.includes(cleanEmail);
+            if (!isExplicitAdmin) {
+              logAudit(cleanEmail, 'security.admin_elevation_blocked', `Google Sign-in email ${cleanEmail} attempted to link to admin account but is not in TRUSTED_ADMIN_EMAILS`);
+              return res.status(403).json({ error: 'Administrator accounts cannot be automatically linked via Google Sign-In. Please sign in with administrator credentials.' });
+            }
+
+            // Prevent takeover if admin already has a different Google ID
+            if (row.google_id && row.google_id !== googleId) {
+              logAudit(cleanEmail, 'security.admin_takeover_blocked', `Google Sign-in sub ${googleId} attempted takeover of admin account ${cleanEmail}`);
+              return res.status(403).json({ error: 'This administrator account is already linked to a different Google account. Please log in with primary admin credentials.' });
+            }
+          }
+
+          // Safely link Google identity
           await query(
             'UPDATE users SET google_id = $1, avatar_url = COALESCE(avatar_url, $2) WHERE id = $3',
             [googleId, avatarUrl, row.id]
           );
+
+          let validatedRole = row.role as 'client' | 'admin';
+          if (validatedRole === 'admin' && !TRUSTED_ADMIN_EMAILS.includes(cleanEmail)) {
+            validatedRole = 'client';
+          }
+
           user = {
             id: row.id,
             name: row.name,
             email: row.email,
             phone: row.phone,
             age: row.age,
-            role: row.role as 'client' | 'admin',
+            role: validatedRole,
             tokenBalance: row.token_balance,
             suspended: Boolean(row.suspended),
             googleId,
@@ -685,7 +730,7 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
             createdAt: new Date(row.created_at).toISOString(),
             passwordHash: row.password_hash,
           };
-          logAudit(cleanEmail, 'auth.google_linked', 'Linked verified Google identity to existing user account');
+          logAudit(cleanEmail, 'auth.google_linked', `Linked verified Google identity to existing user account (${validatedRole})`);
         } else {
           // 3. New public sign-up: Public Google sign-ups ALWAYS receive the ordinary 'client' role (never admin)
           const newUserId = `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
@@ -987,31 +1032,106 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
   return res.json({ ok: true, user: publicUser });
 });
 
-// Password recovery endpoints
-app.post('/api/auth/forgot', (req: Request, res: Response) => {
+// Password recovery endpoints (single-use token hash stored in PostgreSQL password_resets table)
+app.post('/api/auth/forgot', async (req: Request, res: Response) => {
   const { email } = req.body || {};
   const cleanEmail = String(email || '').trim().toLowerCase();
 
-  const token = crypto.randomBytes(16).toString('hex');
-  logAudit(cleanEmail, 'auth.password_reset_request', 'Reset token requested');
+  if (!cleanEmail || !cleanEmail.includes('@')) {
+    return res.status(400).json({ error: 'Valid email address is required.' });
+  }
 
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  const resetId = `rst_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+  if (isDbConfigured) {
+    try {
+      const uRes = await query<{ id: string }>('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [cleanEmail]);
+      if (uRes.rows.length > 0) {
+        const userId = uRes.rows[0].id;
+        await query(
+          'INSERT INTO password_resets (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
+          [resetId, userId, tokenHash, expiresAt.toISOString()]
+        );
+        logAudit(cleanEmail, 'auth.password_reset_request', 'Single-use reset token created');
+      }
+    } catch (err) {
+      console.warn('[Password Reset Warning]:', err);
+    }
+  }
+
+  // Consistent message to prevent email enumeration
   return res.json({
     ok: true,
     message: 'If that email address is registered, password reset instructions have been generated.',
-    demoResetToken: token,
   });
 });
 
-app.post('/api/auth/reset', (req: Request, res: Response) => {
+app.post('/api/auth/reset', async (req: Request, res: Response) => {
   const { token, password } = req.body || {};
-  if (!token || !password || typeof password !== 'string' || password.length < 8) {
-    return res.status(400).json({ error: 'Valid token and a password of at least 8 characters are required.' });
+  if (!token || typeof token !== 'string' || !password || typeof password !== 'string' || password.length < 8) {
+    return res.status(400).json({ error: 'Valid token and a new password of at least 8 characters are required.' });
   }
 
-  return res.json({
-    ok: true,
-    message: 'Your password has been updated. You can now log in.',
-  });
+  const tokenHash = crypto.createHash('sha256').update(token.trim()).digest('hex');
+
+  if (isDbConfigured && pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const rRes = await client.query<{ id: string; user_id: string; expires_at: string; used_at: string | null }>(
+        'SELECT * FROM password_resets WHERE token_hash = $1 FOR UPDATE',
+        [tokenHash]
+      );
+
+      if (rRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'Invalid or unrecognized password reset token.' });
+      }
+
+      const resetRow = rRes.rows[0];
+      if (resetRow.used_at) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This password reset token has already been used.' });
+      }
+
+      if (new Date(resetRow.expires_at).getTime() < Date.now()) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This password reset token has expired.' });
+      }
+
+      const pwHash = await bcrypt.hash(password, 10);
+      await client.query('UPDATE users SET password_hash = $1 WHERE id = $2', [pwHash, resetRow.user_id]);
+      await client.query('UPDATE password_resets SET used_at = NOW() WHERE id = $1', [resetRow.id]);
+      // Security measure: Revoke all existing active sessions when password is reset
+      await client.query('UPDATE user_sessions SET revoked = true WHERE user_id = $1', [resetRow.user_id]);
+
+      await client.query('COMMIT');
+      logAudit(resetRow.user_id, 'auth.password_reset_success', 'Password reset successfully completed; sessions revoked');
+
+      return res.json({
+        ok: true,
+        message: 'Your password has been updated successfully. You can now log in.',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Password Reset Error]:', err);
+      return res.status(500).json({ error: 'Server error processing password reset.' });
+    } finally {
+      client.release();
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+// Alias for /api/auth/reset-password
+app.post('/api/auth/reset-password', (req: Request, res: Response) => {
+  req.url = '/api/auth/reset';
+  return (app._router.handle as any)(req, res);
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1231,6 +1351,73 @@ app.get('/api/projects/:id', async (req: Request, res: Response) => {
   }
 
   const pId = req.params.id?.toUpperCase();
+
+  if (isDbConfigured) {
+    try {
+      const result = await query(
+        `SELECT p.*, COALESCE(
+           json_agg(
+             json_build_object(
+               'id', u.id,
+               'authorName', u.author_name,
+               'authorRole', u.author_role,
+               'message', u.message,
+               'createdAt', u.created_at
+             ) ORDER BY u.created_at ASC
+           ) FILTER (WHERE u.id IS NOT NULL),
+           '[]'::json
+         ) AS updates
+         FROM projects p
+         LEFT JOIN project_updates u ON u.project_id = p.id
+         WHERE (p.id = $1 OR p.project_id = $2)
+         GROUP BY p.id`,
+        [req.params.id, pId]
+      );
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+
+      const row = result.rows[0];
+      const isOwner = row.client_id === user.id || row.client_email?.toLowerCase() === user.email.toLowerCase();
+      if (user.role !== 'admin' && !isOwner) {
+        return res.status(403).json({ error: 'Access denied.' });
+      }
+
+      const project = {
+        id: row.id,
+        projectId: row.project_id,
+        clientId: row.client_id,
+        clientName: row.client_name,
+        clientEmail: row.client_email,
+        clientPhone: row.client_phone,
+        age: row.age,
+        service: row.service,
+        title: row.title,
+        description: row.description,
+        requirements: row.requirements,
+        budget: row.budget,
+        deadline: row.deadline,
+        references: row.references_text,
+        attachments: row.attachments || [],
+        extra: row.extra || {},
+        status: row.status,
+        progress: row.progress,
+        tokenCharged: row.token_charged,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        updates: (row.updates || []).map((u: any) => ({
+          ...u,
+          createdAt: new Date(u.createdAt).toISOString(),
+        })),
+      };
+
+      return res.json({ ok: true, project });
+    } catch (err) {
+      console.warn('[Project Detail DB Warning]:', err);
+    }
+  }
+
   const project = MEMORY_PROJECTS.find((p) => p.projectId === pId || p.id === req.params.id);
 
   if (!project) {
@@ -1249,15 +1436,98 @@ app.get('/api/projects/:id', async (req: Request, res: Response) => {
 /* -------------------------------------------------------------------------- */
 
 app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) => {
-  const clients = MEMORY_USERS.filter((u) => u.role === 'client');
-  const tokensInCirculation = clients.reduce((acc, c) => acc + c.tokenBalance, 0);
+  if (isDbConfigured) {
+    try {
+      const usersCountRes = await query(`
+        SELECT 
+          COUNT(*) AS total_users,
+          COUNT(*) FILTER (WHERE role = 'client') AS total_clients,
+          COUNT(*) FILTER (WHERE role = 'admin') AS total_admins,
+          COUNT(*) FILTER (WHERE NOT suspended) AS active_users,
+          COUNT(*) FILTER (WHERE suspended) AS suspended_users,
+          COUNT(*) FILTER (WHERE google_id IS NOT NULL) AS google_users,
+          COALESCE(SUM(token_balance), 0) AS tokens_in_circulation
+        FROM users
+      `);
 
+      const projectsCountRes = await query(`
+        SELECT 
+          COUNT(*) AS total_projects,
+          COUNT(*) FILTER (WHERE status = 'submitted') AS submitted,
+          COUNT(*) FILTER (WHERE status = 'approved') AS approved,
+          COUNT(*) FILTER (WHERE status = 'in_progress') AS in_progress,
+          COUNT(*) FILTER (WHERE status = 'delivered') AS delivered,
+          COUNT(*) FILTER (WHERE status = 'completed') AS completed,
+          COUNT(*) FILTER (WHERE status = 'rejected') AS rejected
+        FROM projects
+      `);
+
+      const recentProjectsRes = await query(`
+        SELECT id, project_id, client_name, client_email, title, service, status, progress, created_at
+        FROM projects
+        ORDER BY created_at DESC
+        LIMIT 5
+      `);
+
+      const recentUsersRes = await query(`
+        SELECT id, name, email, role, token_balance, suspended, (google_id IS NOT NULL) AS is_google, created_at
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT 5
+      `);
+
+      const recentLogsRes = await query(`
+        SELECT id, actor, action, detail, created_at
+        FROM audit_logs
+        ORDER BY created_at DESC
+        LIMIT 8
+      `);
+
+      const uRow = usersCountRes.rows[0];
+      const pRow = projectsCountRes.rows[0];
+
+      return res.json({
+        ok: true,
+        stats: {
+          totalUsers: Number(uRow.total_users),
+          clients: Number(uRow.total_clients),
+          admins: Number(uRow.total_admins),
+          activeUsers: Number(uRow.active_users),
+          suspendedUsers: Number(uRow.suspended_users),
+          googleUsers: Number(uRow.google_users),
+          tokensInCirculation: Number(uRow.tokens_in_circulation),
+          projects: Number(pRow.total_projects),
+          byStatus: {
+            submitted: Number(pRow.submitted),
+            approved: Number(pRow.approved),
+            in_progress: Number(pRow.in_progress),
+            delivered: Number(pRow.delivered),
+            completed: Number(pRow.completed),
+            rejected: Number(pRow.rejected),
+          },
+          recentProjects: recentProjectsRes.rows,
+          recentUsers: recentUsersRes.rows,
+          recentActivity: recentLogsRes.rows,
+        },
+      });
+    } catch (err) {
+      console.error('[Admin Stats DB Error]:', err);
+      return res.status(500).json({ error: 'Failed to aggregate admin statistics.' });
+    }
+  }
+
+  const clients = MEMORY_USERS.filter((u) => u.role === 'client');
   return res.json({
     ok: true,
     stats: {
+      totalUsers: MEMORY_USERS.length,
       clients: clients.length,
+      admins: MEMORY_USERS.filter((u) => u.role === 'admin').length,
+      activeUsers: MEMORY_USERS.filter((u) => !u.suspended).length,
+      suspendedUsers: MEMORY_USERS.filter((u) => u.suspended).length,
+      googleUsers: 0,
+      tokensInCirculation: clients.reduce((acc, c) => acc + c.tokenBalance, 0),
       projects: MEMORY_PROJECTS.length,
-      tokensInCirculation,
       byStatus: {
         submitted: MEMORY_PROJECTS.filter((p) => p.status === 'submitted').length,
         approved: MEMORY_PROJECTS.filter((p) => p.status === 'approved').length,
@@ -1266,97 +1536,623 @@ app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) =
         completed: MEMORY_PROJECTS.filter((p) => p.status === 'completed').length,
         rejected: MEMORY_PROJECTS.filter((p) => p.status === 'rejected').length,
       },
-      recentProjects: MEMORY_PROJECTS.slice(0, 6),
-      recentActivity: MEMORY_LOGS.slice(0, 10),
-      recentClients: clients.slice(0, 5).map(({ passwordHash: _, ...pub }) => pub),
+      recentProjects: MEMORY_PROJECTS.slice(0, 5),
+      recentActivity: MEMORY_LOGS.slice(0, 8),
+      recentUsers: clients.slice(0, 5).map(({ passwordHash: _, ...pub }) => pub),
     },
   });
 });
 
-app.get('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
-  const q = String(req.query.q || '').toLowerCase();
-  const clients = MEMORY_USERS.filter((u) => u.role === 'client')
-    .filter((c) => !q || c.name.toLowerCase().includes(q) || c.email.toLowerCase().includes(q))
+app.get('/api/admin/users', requireAdmin, async (req: Request, res: Response) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const role = String(req.query.role || 'all').trim().toLowerCase();
+  const status = String(req.query.status || 'all').trim().toLowerCase();
+  const provider = String(req.query.provider || 'all').trim().toLowerCase();
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
+  const offset = (page - 1) * limit;
+
+  if (isDbConfigured) {
+    try {
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+
+      if (q) {
+        params.push(`%${q}%`);
+        conditions.push(`(LOWER(name) LIKE $${params.length} OR LOWER(email) LIKE $${params.length} OR id LIKE $${params.length})`);
+      }
+
+      if (role === 'client' || role === 'admin') {
+        params.push(role);
+        conditions.push(`role = $${params.length}`);
+      }
+
+      if (status === 'active') {
+        conditions.push('suspended = false');
+      } else if (status === 'suspended') {
+        conditions.push('suspended = true');
+      }
+
+      if (provider === 'google') {
+        conditions.push('google_id IS NOT NULL');
+      } else if (provider === 'email') {
+        conditions.push('google_id IS NULL');
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const countRes = await query(`SELECT COUNT(*) AS total FROM users ${whereClause}`, params);
+      const total = parseInt(countRes.rows[0].total, 10);
+
+      const queryParams = [...params, limit, offset];
+      const limitParamIdx = params.length + 1;
+      const offsetParamIdx = params.length + 2;
+
+      const usersRes = await query(`
+        SELECT 
+          id, name, email, phone, age, role, token_balance, suspended, 
+          avatar_url, created_at,
+          (google_id IS NOT NULL) AS is_google,
+          (CASE WHEN google_id IS NOT NULL THEN 'google' ELSE 'email' END) AS provider
+        FROM users
+        ${whereClause}
+        ORDER BY created_at DESC
+        LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}
+      `, queryParams);
+
+      return res.json({
+        ok: true,
+        users: usersRes.rows.map((row: any) => ({
+          id: row.id,
+          name: row.name,
+          email: row.email,
+          phone: row.phone,
+          age: row.age,
+          role: row.role,
+          tokenBalance: row.token_balance,
+          suspended: Boolean(row.suspended),
+          avatarUrl: row.avatar_url,
+          createdAt: row.created_at,
+          isGoogle: Boolean(row.is_google),
+          provider: row.provider,
+        })),
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 1,
+        },
+      });
+    } catch (err) {
+      console.error('[Admin Users Query Error]:', err);
+      return res.status(500).json({ error: 'Database error fetching users list.' });
+    }
+  }
+
+  // Memory fallback
+  const filtered = MEMORY_USERS
+    .filter((u) => !q || u.name.toLowerCase().includes(q) || u.email.toLowerCase().includes(q))
+    .filter((u) => role === 'all' || u.role === role)
+    .filter((u) => status === 'all' || (status === 'active' ? !u.suspended : u.suspended))
     .map(({ passwordHash: _, ...pub }) => pub);
 
-  return res.json({ ok: true, clients });
+  return res.json({
+    ok: true,
+    users: filtered.slice(offset, offset + limit),
+    pagination: {
+      page,
+      limit,
+      total: filtered.length,
+      totalPages: Math.ceil(filtered.length / limit) || 1,
+    },
+  });
 });
 
-app.post('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
-  const { clientId, action, amount, reason, suspended } = req.body || {};
-  const user = MEMORY_USERS.find((u) => u.id === clientId);
+// Backward compatibility alias for /api/admin/clients
+app.get('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
+  return res.redirect(307, `/api/admin/users?${new URLSearchParams(req.query as any).toString()}`);
+});
 
-  if (!user) {
-    return res.status(404).json({ error: 'Client not found.' });
-  }
-
+app.patch('/api/admin/users/:id/status', requireAdmin, async (req: Request, res: Response) => {
+  const targetUserId = req.params.id;
+  const { suspended } = req.body || {};
   const adminActor = (req as Request & { user: ServerUser }).user;
 
+  if (typeof suspended !== 'boolean') {
+    return res.status(400).json({ error: 'Invalid suspended parameter. Must be boolean.' });
+  }
+
+  if (targetUserId === adminActor.id && suspended) {
+    return res.status(400).json({ error: 'You cannot suspend your own administrative account.' });
+  }
+
+  if (isDbConfigured) {
+    try {
+      const uRes = await query('SELECT * FROM users WHERE id = $1', [targetUserId]);
+      if (uRes.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+      const target = uRes.rows[0];
+
+      if (target.role === 'admin' && suspended) {
+        const activeAdminsRes = await query("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND NOT suspended");
+        const activeAdmins = parseInt(activeAdminsRes.rows[0].count, 10);
+        if (activeAdmins <= 1) {
+          return res.status(400).json({ error: 'Cannot suspend the last active administrator.' });
+        }
+      }
+
+      await query('UPDATE users SET suspended = $1 WHERE id = $2', [suspended, targetUserId]);
+
+      if (suspended) {
+        await query('UPDATE user_sessions SET revoked = true WHERE user_id = $1', [targetUserId]);
+      }
+
+      logAudit(adminActor.email, suspended ? 'admin.user_suspend' : 'admin.user_reinstate', `${target.email} (${target.id})`);
+
+      return res.json({
+        ok: true,
+        userId: targetUserId,
+        suspended,
+        message: `User account ${suspended ? 'suspended and sessions revoked' : 'reinstated'}.`,
+      });
+    } catch (err) {
+      console.error('[Admin Status Update Error]:', err);
+      return res.status(500).json({ error: 'Failed to update user status.' });
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+app.patch('/api/admin/users/:id/role', requireAdmin, async (req: Request, res: Response) => {
+  const targetUserId = req.params.id;
+  const { role } = req.body || {};
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  if (role !== 'client' && role !== 'admin') {
+    return res.status(400).json({ error: "Role must be 'client' or 'admin'." });
+  }
+
+  if (targetUserId === adminActor.id && role !== 'admin') {
+    return res.status(400).json({ error: 'You cannot demote your own administrator account.' });
+  }
+
+  if (isDbConfigured) {
+    try {
+      const uRes = await query('SELECT * FROM users WHERE id = $1', [targetUserId]);
+      if (uRes.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+      const target = uRes.rows[0];
+
+      if (target.role === 'admin' && role === 'client') {
+        const activeAdminsRes = await query("SELECT COUNT(*) AS count FROM users WHERE role = 'admin' AND NOT suspended");
+        const activeAdmins = parseInt(activeAdminsRes.rows[0].count, 10);
+        if (activeAdmins <= 1) {
+          return res.status(400).json({ error: 'Cannot demote the last active administrator.' });
+        }
+      }
+
+      await query('UPDATE users SET role = $1 WHERE id = $2', [role, targetUserId]);
+
+      logAudit(adminActor.email, 'admin.role_change', `${target.email}: ${target.role} -> ${role}`);
+
+      return res.json({
+        ok: true,
+        userId: targetUserId,
+        role,
+        message: `User role updated to ${role}.`,
+      });
+    } catch (err) {
+      console.error('[Admin Role Update Error]:', err);
+      return res.status(500).json({ error: 'Failed to update user role.' });
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+app.post('/api/admin/users/:id/tokens', requireAdmin, async (req: Request, res: Response) => {
+  const targetUserId = req.params.id;
+  const { amount, reason } = req.body || {};
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  const numAmount = parseInt(String(amount), 10);
+  if (isNaN(numAmount) || numAmount === 0) {
+    return res.status(400).json({ error: 'Amount must be a non-zero integer.' });
+  }
+
+  const cleanReason = String(reason || '').trim();
+  if (!cleanReason) {
+    return res.status(400).json({ error: 'A specific reason is required for token adjustments.' });
+  }
+
+  if (isDbConfigured && pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const uRes = await client.query('SELECT id, email, token_balance FROM users WHERE id = $1 FOR UPDATE', [targetUserId]);
+      if (uRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'User not found.' });
+      }
+      const userRow = uRes.rows[0];
+      const newBalance = userRow.token_balance + numAmount;
+      if (newBalance < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `Insufficient user balance (${userRow.token_balance}) for this deduction.` });
+      }
+
+      await client.query('UPDATE users SET token_balance = $1 WHERE id = $2', [newBalance, targetUserId]);
+
+      const txId = `tx_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+      await client.query(
+        'INSERT INTO token_transactions (id, client_id, amount, reason, created_by_id, created_at) VALUES ($1, $2, $3, $4, $5, NOW())',
+        [txId, targetUserId, numAmount, cleanReason, adminActor.id]
+      );
+
+      await client.query('COMMIT');
+
+      logAudit(adminActor.email, 'admin.tokens_adjust', `${userRow.email}: ${numAmount >= 0 ? '+' : ''}${numAmount} (Balance: ${newBalance}) — ${cleanReason}`);
+
+      return res.json({
+        ok: true,
+        userId: targetUserId,
+        tokenBalance: newBalance,
+        transactionId: txId,
+        message: `Credits successfully adjusted. New balance: ${newBalance}.`,
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Admin Token Adjustment Error]:', err);
+      return res.status(500).json({ error: 'Failed to adjust user credits.' });
+    } finally {
+      client.release();
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req: Request, res: Response) => {
+  const targetUserId = req.params.id;
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  if (isDbConfigured) {
+    try {
+      const uRes = await query('SELECT id, email, name FROM users WHERE id = $1', [targetUserId]);
+      if (uRes.rows.length === 0) {
+        return res.status(404).json({ error: 'User not found.' });
+      }
+      const target = uRes.rows[0];
+
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+      const resetId = `rst_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
+      const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+      await query(
+        'INSERT INTO password_resets (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
+        [resetId, target.id, tokenHash, expiresAt.toISOString()]
+      );
+
+      logAudit(adminActor.email, 'admin.password_reset_link_generated', `Generated single-use reset token for ${target.email}`);
+
+      return res.json({
+        ok: true,
+        user: { id: target.id, email: target.email, name: target.name },
+        resetToken: rawToken,
+        resetPath: `/reset-password?token=${rawToken}`,
+        expiresInMinutes: 60,
+        message: 'Single-use password reset link generated successfully. Expires in 60 minutes.',
+      });
+    } catch (err) {
+      console.error('[Admin Password Reset Link Error]:', err);
+      return res.status(500).json({ error: 'Failed to generate reset link.' });
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+app.get('/api/admin/projects', requireAdmin, async (req: Request, res: Response) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const status = String(req.query.status || 'all').trim().toLowerCase();
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
+  const offset = (page - 1) * limit;
+
+  if (isDbConfigured) {
+    try {
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+
+      if (q) {
+        params.push(`%${q}%`);
+        conditions.push(`(LOWER(p.title) LIKE $${params.length} OR LOWER(p.project_id) LIKE $${params.length} OR LOWER(p.client_name) LIKE $${params.length} OR LOWER(p.client_email) LIKE $${params.length})`);
+      }
+
+      if (status !== 'all') {
+        params.push(status);
+        conditions.push(`p.status = $${params.length}`);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const countRes = await query(`SELECT COUNT(*) AS total FROM projects p ${whereClause}`, params);
+      const total = parseInt(countRes.rows[0].total, 10);
+
+      const queryParams = [...params, limit, offset];
+      const limitParamIdx = params.length + 1;
+      const offsetParamIdx = params.length + 2;
+
+      const result = await query(
+        `SELECT p.*, COALESCE(
+           json_agg(
+             json_build_object(
+               'id', u.id,
+               'authorName', u.author_name,
+               'authorRole', u.author_role,
+               'message', u.message,
+               'createdAt', u.created_at
+             ) ORDER BY u.created_at ASC
+           ) FILTER (WHERE u.id IS NOT NULL),
+           '[]'::json
+         ) AS updates
+         FROM projects p
+         LEFT JOIN project_updates u ON u.project_id = p.id
+         ${whereClause}
+         GROUP BY p.id
+         ORDER BY p.created_at DESC
+         LIMIT $${limitParamIdx} OFFSET $${offsetParamIdx}`,
+        queryParams
+      );
+
+      const projects = result.rows.map((row: any) => ({
+        id: row.id,
+        projectId: row.project_id,
+        clientId: row.client_id,
+        clientName: row.client_name,
+        clientEmail: row.client_email,
+        clientPhone: row.client_phone,
+        age: row.age,
+        service: row.service,
+        title: row.title,
+        description: row.description,
+        requirements: row.requirements,
+        budget: row.budget,
+        deadline: row.deadline,
+        references: row.references_text,
+        attachments: row.attachments || [],
+        extra: row.extra || {},
+        status: row.status,
+        progress: row.progress,
+        tokenCharged: row.token_charged,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+        updates: (row.updates || []).map((u: any) => ({
+          ...u,
+          createdAt: new Date(u.createdAt).toISOString(),
+        })),
+      }));
+
+      return res.json({
+        ok: true,
+        projects,
+        pagination: {
+          page,
+          limit,
+          total,
+          totalPages: Math.ceil(total / limit) || 1,
+        },
+      });
+    } catch (err) {
+      console.error('[Admin Projects Query Error]:', err);
+      return res.status(500).json({ error: 'Database error fetching admin projects.' });
+    }
+  }
+
+  // Memory fallback
+  const filtered = MEMORY_PROJECTS
+    .filter((p) => !q || p.title.toLowerCase().includes(q) || p.projectId.toLowerCase().includes(q) || p.clientName.toLowerCase().includes(q) || p.clientEmail.toLowerCase().includes(q))
+    .filter((p) => status === 'all' || p.status === status);
+
+  return res.json({
+    ok: true,
+    projects: filtered.slice(offset, offset + limit),
+    pagination: {
+      page,
+      limit,
+      total: filtered.length,
+      totalPages: Math.ceil(filtered.length / limit) || 1,
+    },
+  });
+});
+
+app.patch('/api/admin/projects/:id', requireAdmin, async (req: Request, res: Response) => {
+  const targetProjectId = req.params.id;
+  const { status, progress, message } = req.body || {};
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  const VALID_STATUSES = ['submitted', 'approved', 'in_progress', 'delivered', 'completed', 'rejected'];
+
+  if (status && !VALID_STATUSES.includes(status)) {
+    return res.status(400).json({ error: `Invalid status. Must be one of: ${VALID_STATUSES.join(', ')}` });
+  }
+
+  const numProgress = progress !== undefined ? Math.max(0, Math.min(100, parseInt(String(progress), 10))) : undefined;
+
+  if (isDbConfigured && pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const pRes = await client.query('SELECT * FROM projects WHERE id = $1 OR project_id = $1 FOR UPDATE', [targetProjectId]);
+      if (pRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const project = pRes.rows[0];
+
+      const newStatus = status || project.status;
+      const newProgress = numProgress !== undefined ? numProgress : project.progress;
+
+      await client.query(
+        'UPDATE projects SET status = $1, progress = $2, updated_at = NOW() WHERE id = $3',
+        [newStatus, newProgress, project.id]
+      );
+
+      if (message && typeof message === 'string' && message.trim().length > 0) {
+        const updId = `upd_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+        await client.query(
+          'INSERT INTO project_updates (id, project_id, author_name, author_role, message, created_at) VALUES ($1, $2, $3, $4, $5, NOW())',
+          [updId, project.id, adminActor.name, 'admin', message.trim()]
+        );
+      }
+
+      await client.query('COMMIT');
+
+      logAudit(adminActor.email, 'admin.project_update', `${project.project_id} -> status: ${newStatus}, progress: ${newProgress}%`);
+
+      return res.json({
+        ok: true,
+        projectId: project.project_id,
+        status: newStatus,
+        progress: newProgress,
+        message: 'Project updated successfully.',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Admin Project Update Error]:', err);
+      return res.status(500).json({ error: 'Failed to update project.' });
+    } finally {
+      client.release();
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+app.delete('/api/admin/projects/:id', requireAdmin, async (req: Request, res: Response) => {
+  const targetProjectId = req.params.id;
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  if (isDbConfigured) {
+    try {
+      const pRes = await query('SELECT * FROM projects WHERE id = $1 OR project_id = $1', [targetProjectId]);
+      if (pRes.rows.length === 0) {
+        return res.status(404).json({ error: 'Project not found.' });
+      }
+      const project = pRes.rows[0];
+      await query('DELETE FROM projects WHERE id = $1', [project.id]);
+      logAudit(adminActor.email, 'admin.project_delete', `${project.project_id} (${project.title})`);
+      return res.json({ ok: true, message: `Project ${project.project_id} deleted successfully.` });
+    } catch (err) {
+      console.error('[Admin Project Delete Error]:', err);
+      return res.status(500).json({ error: 'Failed to delete project.' });
+    }
+  }
+
+  const idx = MEMORY_PROJECTS.findIndex((p) => p.id === targetProjectId || p.projectId === targetProjectId);
+  if (idx !== -1) {
+    const deleted = MEMORY_PROJECTS.splice(idx, 1)[0];
+    logAudit(adminActor.email, 'admin.project_delete', `${deleted.projectId} (${deleted.title})`);
+    return res.json({ ok: true, message: `Project ${deleted.projectId} deleted.` });
+  }
+  return res.status(404).json({ error: 'Project not found.' });
+});
+
+app.get('/api/admin/logs', requireAdmin, async (req: Request, res: Response) => {
+  const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
+  const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
+
+  if (isDbConfigured) {
+    try {
+      const countRes = await query('SELECT COUNT(*) AS total FROM audit_logs');
+      const logsRes = await query(
+        'SELECT id, actor, action, detail, created_at FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+        [limit, offset]
+      );
+      return res.json({
+        ok: true,
+        logs: logsRes.rows,
+        total: parseInt(countRes.rows[0].total, 10),
+        limit,
+        offset,
+      });
+    } catch (err) {
+      console.error('[Admin Logs Query Error]:', err);
+      return res.status(500).json({ error: 'Failed to fetch audit logs.' });
+    }
+  }
+
+  return res.json({ ok: true, logs: MEMORY_LOGS, total: MEMORY_LOGS.length, limit, offset });
+});
+
+app.get('/api/admin/system', requireAdmin, async (_req: Request, res: Response) => {
+  let dbStatus = 'disconnected';
+  let dbLatencyMs: number | null = null;
+  let activeSessionsCount = 0;
+
+  if (isDbConfigured) {
+    try {
+      const start = Date.now();
+      await query('SELECT 1');
+      dbLatencyMs = Date.now() - start;
+      dbStatus = 'connected';
+
+      const sRes = await query('SELECT COUNT(*) AS count FROM user_sessions WHERE NOT revoked AND expires_at > NOW()');
+      activeSessionsCount = parseInt(sRes.rows[0].count, 10) || 0;
+    } catch {
+      dbStatus = 'error';
+    }
+  }
+
+  const clientId = process.env.GOOGLE_CLIENT_ID?.trim() || process.env.VITE_GOOGLE_CLIENT_ID?.trim();
+
+  return res.json({
+    ok: true,
+    system: {
+      serverTime: new Date().toISOString(),
+      uptimeSeconds: Math.floor(process.uptime()),
+      nodeVersion: process.version,
+      environment: process.env.NODE_ENV || 'development',
+      database: {
+        configured: isDbConfigured,
+        status: dbStatus,
+        latencyMs: dbLatencyMs,
+        activeSessionsCount,
+      },
+      googleAuth: {
+        configured: Boolean(clientId),
+        clientIdPrefix: clientId ? clientId.slice(0, 12) + '...' : null,
+      },
+    },
+  });
+});
+
+// Backward compatibility for legacy POST /api/admin/clients
+app.post('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
+  const { clientId, action, amount, reason, suspended } = req.body || {};
   if (action === 'suspend') {
-    if (user.role === 'admin' && suspended) {
-      const activeAdmins = MEMORY_USERS.filter((u) => u.role === 'admin' && !u.suspended);
-      if (activeAdmins.length <= 1) {
-        return res.status(400).json({ error: 'Cannot suspend the last active administrator.' });
-      }
-    }
-    user.suspended = Boolean(suspended);
-    if (isDbConfigured) {
-      query('UPDATE users SET suspended = $1 WHERE id = $2', [user.suspended, user.id]).catch(() => {});
-      if (user.suspended) {
-        query('UPDATE user_sessions SET revoked = true WHERE user_id = $1', [user.id]).catch(() => {});
-      }
-    }
-    logAudit(adminActor.email, user.suspended ? 'client.suspend' : 'client.reinstate', user.email);
-    return res.json({ ok: true, suspended: user.suspended });
+    req.params.id = clientId;
+    req.body.suspended = Boolean(suspended);
+    return (app._router.handle as any)(req, res);
   }
-
   if (action === 'tokens') {
-    const numAmount = Number(amount) || 0;
-    if (numAmount === 0) return res.status(400).json({ error: 'Amount must be non-zero.' });
-    if (user.tokenBalance + numAmount < 0) {
-      return res.status(400).json({ error: 'Insufficient client balance for this deduction.' });
-    }
-    user.tokenBalance += numAmount;
-    if (isDbConfigured) {
-      query('UPDATE users SET token_balance = $1 WHERE id = $2', [user.tokenBalance, user.id]).catch(() => {});
-    }
-    logAudit(adminActor.email, 'tokens.adjust', `${user.email}: ${numAmount >= 0 ? '+' : ''}${numAmount} (${reason || 'Admin adjustment'})`);
-    return res.json({ ok: true, tokenBalance: user.tokenBalance });
+    req.params.id = clientId;
+    req.body.amount = amount;
+    req.body.reason = reason;
+    return (app._router.handle as any)(req, res);
   }
-
   return res.status(400).json({ error: 'Unknown action.' });
 });
-
-app.get('/api/admin/logs', requireAdmin, (_req: Request, res: Response) => {
-  return res.json({ ok: true, logs: MEMORY_LOGS });
-});
-
-// Serve frontend static build in production deployment
-const distPath = path.resolve(process.cwd(), 'dist');
-if (fs.existsSync(distPath)) {
-  app.use(express.static(distPath));
-
-  // Client-side SPA routing fallback for non-API routes
-  app.get('*', (req: Request, res: Response, next: NextFunction) => {
-    if (req.path.startsWith('/api')) {
-      return next();
-    }
-    const indexPath = path.join(distPath, 'index.html');
-    if (fs.existsSync(indexPath)) {
-      return res.sendFile(indexPath);
-    }
-    return next();
-  });
-}
 
 // 404 handler for API routes
 app.all('/api/*', (_req: Request, res: Response) => {
   res.status(404).json({ error: 'API endpoint not found.' });
-});
-
-// Fallback 404 for any remaining unhandled non-API paths
-app.use((_req: Request, res: Response) => {
-  res.status(404).send('Not Found');
 });
 
 // Global Error Handler

@@ -78,3 +78,5 @@ export async function api<T = unknown>(path: string, init?: RequestInit): Promis
 
   return data as T;
 }
+
+export * from './admin-api';
