@@ -62,8 +62,8 @@ export function sanitizePublicUser(user: User): PublicUser {
 }
 
 // Initial Seed Data with real Bcrypt hashes
-const DEFAULT_ADMIN_HASH = '$2b$10$FHDR5npUPT2UVLG5G.b7V.Hh3bRIxVk/hveSHMNpNYE6a6GQjYnn2'; // bcrypt for admin12345
-const DEFAULT_CLIENT_HASH = '$2b$10$7d3NSvQM6yMmTFvhBXchyeTtK5WbLbjHqc8dEyRXqe7ETi7kVk40O'; // bcrypt for client12345
+const DEFAULT_ADMIN_HASH = '$2b$10$FHDR5npUPT2UVLG5G.b7V.Hh3bRIxVk/hveSHMNpNYE6a6GQjYnn2'; 
+const DEFAULT_CLIENT_HASH = '$2b$10$7d3NSvQM6yMmTFvhBXchyeTtK5WbLbjHqc8dEyRXqe7ETi7kVk40O'; 
 
 const INITIAL_USERS: User[] = [
   {
