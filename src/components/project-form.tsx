@@ -5,6 +5,7 @@ import { Button, Field, Input, Select, Textarea } from './ui';
 import { useToast } from './toast';
 import { useI18n } from '@/lib/i18n';
 import { store } from '@/lib/store';
+import { api } from '@/lib/api';
 import type { Attachment, Project } from '@/types';
 import {
   IconWeb,
@@ -147,23 +148,35 @@ export function ProjectForm({
 
     setSubmitting(true);
     try {
-      const created = store.createProject({
-        service,
-        title: form.title,
-        description: form.description,
-        requirements: form.requirements,
-        budget: form.budget,
-        deadline: form.deadline,
-        references: form.references,
-        extra,
-        attachments,
-        clientName: form.name,
-        clientEmail: form.email,
-        clientPhone: form.phone,
-        age: form.age ? Number(form.age) : undefined,
-        clientId: sessionUser?.id || null,
+      const response = await api<{
+        ok: boolean;
+        projectId: string;
+        project: Project;
+        message: string;
+      }>('/api/projects', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: form.name.trim(),
+          email: form.email.trim(),
+          phone: form.phone.trim() || undefined,
+          age: form.age ? Number(form.age) : undefined,
+          service,
+          title: form.title.trim(),
+          description: form.description.trim(),
+          requirements: form.requirements.trim(),
+          budget: form.budget,
+          deadline: form.deadline,
+          references: form.references.trim(),
+          extra,
+          attachments,
+        }),
       });
 
+      if (!response.ok || !response.project) {
+        throw new Error('The server did not confirm the project request.');
+      }
+
+      const created = response.project;
       setSubmittedProject(created);
       push('success', `Project request ${created.projectId} submitted successfully.`);
       if (onComplete) onComplete(created);

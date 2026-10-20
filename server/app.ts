@@ -1238,105 +1238,101 @@ app.post('/api/projects', async (req: Request, res: Response) => {
   const description = String(body.description || '').trim();
   const service = String(body.service || 'website-development').trim();
 
-  if (!clientName || clientName.length < 2) {
-    return res.status(400).json({ error: 'Full name is required.' });
+  if (!clientName || clientName.length < 2 || clientName.length > 120) {
+    return res.status(400).json({ error: 'Full name must be between 2 and 120 characters.' });
   }
-  if (!clientEmail || !clientEmail.includes('@')) {
+  if (!clientEmail || clientEmail.length > 255 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(clientEmail)) {
     return res.status(400).json({ error: 'A valid email address is required.' });
   }
-  if (!title || title.length < 3) {
-    return res.status(400).json({ error: 'Project title must be at least 3 characters.' });
+  if (!title || title.length < 3 || title.length > 255) {
+    return res.status(400).json({ error: 'Project title must be between 3 and 255 characters.' });
   }
   if (!description || description.length < 15) {
     return res.status(400).json({ error: 'Please describe your project (minimum 15 characters).' });
   }
+  if (description.length > 20000) {
+    return res.status(400).json({ error: 'Project description is too long.' });
+  }
+  if (service.length > 80) {
+    return res.status(400).json({ error: 'Invalid service selection.' });
+  }
 
+  const now = new Date().toISOString();
   const projectId = generateProjectId();
   const id = `proj_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-
+  const updateId = `upd_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   const newProject: ServerProject = {
     id,
     projectId,
+    // Never trust a clientId submitted in the request body; derive it from the validated session.
     clientId: user?.id || null,
     clientName,
     clientEmail,
-    clientPhone: body.phone ? String(body.phone).trim() : null,
-    age: body.age ? Number(body.age) : null,
+    clientPhone: body.phone ? String(body.phone).trim().slice(0, 40) : null,
+    age: body.age && Number.isInteger(Number(body.age)) && Number(body.age) >= 0 && Number(body.age) <= 120 ? Number(body.age) : null,
     service,
     title,
     description,
-    requirements: body.requirements ? String(body.requirements).trim() : null,
-    budget: body.budget ? String(body.budget).trim() : "Custom — Let's Discuss",
-    deadline: body.deadline ? String(body.deadline).trim() : null,
-    references: body.references ? String(body.references).trim() : null,
-    attachments: Array.isArray(body.attachments) ? body.attachments : [],
-    extra: body.extra || {},
+    requirements: body.requirements ? String(body.requirements).trim().slice(0, 20000) : null,
+    budget: body.budget ? String(body.budget).trim().slice(0, 80) : "Custom — Let's Discuss",
+    deadline: body.deadline ? String(body.deadline).trim().slice(0, 80) : null,
+    references: body.references ? String(body.references).trim().slice(0, 2000) : null,
+    attachments: Array.isArray(body.attachments) ? body.attachments.slice(0, 5) : [],
+    extra: body.extra && typeof body.extra === 'object' && !Array.isArray(body.extra) ? body.extra : {},
     status: 'submitted',
     progress: 0,
     tokenCharged: 0,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    updates: [
-      {
-        id: `upd_${Date.now()}`,
-        authorName: 'The Creators Intake',
-        authorRole: 'admin',
-        message: 'Project brief received. Our engineering lead will review your specifications within 24 hours.',
-        createdAt: new Date().toISOString(),
-      },
-    ],
+    createdAt: now,
+    updatedAt: now,
+    updates: [{
+      id: updateId,
+      authorName: 'The Creators Intake',
+      authorRole: 'admin',
+      message: 'Project brief received. Our team will review your specifications.',
+      createdAt: now,
+    }],
   };
 
-  if (isDbConfigured) {
+  if (isDbConfigured && pool) {
+    let client;
     try {
-      await query(
+      client = await pool.connect();
+      await client.query('BEGIN');
+      await client.query(
         `INSERT INTO projects (
            id, project_id, client_id, client_name, client_email, client_phone, age,
            service, title, description, requirements, budget, deadline, references_text,
            attachments, extra, status, progress, token_charged
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)`,
-        [
-          newProject.id,
-          newProject.projectId,
-          newProject.clientId,
-          newProject.clientName,
-          newProject.clientEmail,
-          newProject.clientPhone,
-          newProject.age,
-          newProject.service,
-          newProject.title,
-          newProject.description,
-          newProject.requirements,
-          newProject.budget,
-          newProject.deadline,
-          newProject.references,
-          JSON.stringify(newProject.attachments),
-          JSON.stringify(newProject.extra),
-          newProject.status,
-          newProject.progress,
-          newProject.tokenCharged,
-        ]
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19)`,
+        [id, projectId, newProject.clientId, clientName, clientEmail, newProject.clientPhone, newProject.age,
+          service, title, description, newProject.requirements, newProject.budget, newProject.deadline,
+          newProject.references, JSON.stringify(newProject.attachments), JSON.stringify(newProject.extra),
+          newProject.status, newProject.progress, newProject.tokenCharged]
       );
-
-      await query(
+      await client.query(
         `INSERT INTO project_updates (id, project_id, author_name, author_role, message)
          VALUES ($1, $2, $3, $4, $5)`,
-        [
-          newProject.updates[0].id,
-          newProject.id,
-          newProject.updates[0].authorName,
-          newProject.updates[0].authorRole,
-          newProject.updates[0].message,
-        ]
+        [updateId, id, newProject.updates[0].authorName, newProject.updates[0].authorRole, newProject.updates[0].message]
       );
+      await client.query('COMMIT');
     } catch (err) {
-      console.warn('[Project Insert DB Warning]:', err);
+      if (client) {
+        try { await client.query('ROLLBACK'); } catch { /* preserve original database error */ }
+      }
+      // Do not report success or silently fall back to memory when PostgreSQL is configured but fails.
+      console.error('[Project Submission DB Error]:', err instanceof Error ? err.message : 'Unknown database error');
+      return res.status(503).json({ error: 'Project request could not be saved right now. Please try again shortly.' });
+    } finally {
+      client?.release();
     }
+  } else if (process.env.NODE_ENV === 'production') {
+    return res.status(503).json({ error: 'Project submission is temporarily unavailable because persistent storage is not configured.' });
+  } else {
+    // Development-only fallback; do not use volatile memory as production persistence.
+    MEMORY_PROJECTS.unshift(newProject);
   }
 
-  MEMORY_PROJECTS.unshift(newProject);
   logAudit(clientEmail, 'project.submit', `${projectId} (${service}) — ${title}`);
-
   return res.status(201).json({
     ok: true,
     projectId,
