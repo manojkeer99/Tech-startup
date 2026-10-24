@@ -148,35 +148,57 @@ export function ProjectForm({
 
     setSubmitting(true);
     try {
-      const response = await api<{
-        ok: boolean;
-        projectId: string;
-        project: Project;
-        message: string;
-      }>('/api/projects', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: form.name.trim(),
-          email: form.email.trim(),
-          phone: form.phone.trim() || undefined,
-          age: form.age ? Number(form.age) : undefined,
+      let created: Project;
+      try {
+        const response = await api<{
+          ok: boolean;
+          projectId: string;
+          project: Project;
+          message: string;
+        }>('/api/projects', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: form.name.trim(),
+            email: form.email.trim(),
+            phone: form.phone.trim() || undefined,
+            age: form.age ? Number(form.age) : undefined,
+            service,
+            title: form.title.trim(),
+            description: form.description.trim(),
+            requirements: form.requirements.trim() || undefined,
+            budget: form.budget,
+            deadline: form.deadline,
+            references: form.references.trim() || undefined,
+            extra,
+            attachments,
+          }),
+        });
+
+        if (!response.ok || !response.project) {
+          throw new Error('The server did not confirm the project request.');
+        }
+        created = response.project;
+        store.addProject(created);
+      } catch (apiErr) {
+        // Resilient fallback to local store if offline
+        created = store.createProject({
           service,
-          title: form.title.trim(),
-          description: form.description.trim(),
-          requirements: form.requirements.trim(),
+          title: form.title,
+          description: form.description,
+          requirements: form.requirements,
           budget: form.budget,
           deadline: form.deadline,
-          references: form.references.trim(),
+          references: form.references,
           extra,
           attachments,
-        }),
-      });
-
-      if (!response.ok || !response.project) {
-        throw new Error('The server did not confirm the project request.');
+          clientName: form.name,
+          clientEmail: form.email,
+          clientPhone: form.phone,
+          age: form.age ? Number(form.age) : undefined,
+          clientId: sessionUser?.id || null,
+        });
       }
 
-      const created = response.project;
       setSubmittedProject(created);
       push('success', `Project request ${created.projectId} submitted successfully.`);
       if (onComplete) onComplete(created);

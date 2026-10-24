@@ -217,11 +217,3 @@ export function SectionLabel({ children, className }: { children: ReactNode; cla
     </span>
   );
 }
-
-export function TokenAmount({ value }: { value: number }) {
-  return (
-    <span className={cn('inline-flex items-center font-mono text-sm font-semibold tabular-nums', value > 0 ? 'text-emerald-400' : 'text-rose-400')}>
-      {value > 0 ? `+${value}` : value} tokens
-    </span>
-  );
-}

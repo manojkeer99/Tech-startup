@@ -8,7 +8,6 @@ export interface AdminStats {
   activeUsers: number;
   suspendedUsers: number;
   googleUsers: number;
-  tokensInCirculation: number;
   projects: number;
   byStatus: {
     submitted: number;
@@ -55,7 +54,7 @@ export interface AdminUserItem {
   phone?: string | null;
   age?: number | null;
   role: 'client' | 'admin';
-  tokenBalance: number;
+  tokenBalance?: number;
   suspended: boolean;
   avatarUrl?: string | null;
   createdAt: string;
@@ -99,13 +98,7 @@ export interface AdminUserRoleResponse {
   message: string;
 }
 
-export interface AdminUserTokensResponse {
-  ok: boolean;
-  userId: string;
-  tokenBalance: number;
-  transactionId: string;
-  message: string;
-}
+
 
 export interface AdminPasswordResetResponse {
   ok: boolean;
@@ -212,16 +205,7 @@ export async function updateAdminUserRole(userId: string, role: 'client' | 'admi
   });
 }
 
-export async function adjustAdminUserTokens(
-  userId: string,
-  amount: number,
-  reason: string
-): Promise<AdminUserTokensResponse> {
-  return api<AdminUserTokensResponse>(`/api/admin/users/${encodeURIComponent(userId)}/tokens`, {
-    method: 'POST',
-    body: JSON.stringify({ amount, reason }),
-  });
-}
+
 
 export async function generateAdminPasswordResetLink(userId: string): Promise<AdminPasswordResetResponse> {
   return api<AdminPasswordResetResponse>(`/api/admin/users/${encodeURIComponent(userId)}/reset-password`, {

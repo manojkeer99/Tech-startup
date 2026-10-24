@@ -19,7 +19,6 @@ import {
   TcMonogram,
   IconFolder,
   IconPlus,
-  IconToken,
   IconBell,
   IconUser,
   IconChart,
@@ -30,7 +29,7 @@ import {
   IconFile,
 } from '@/components/icons';
 import { formatDate, timeAgo } from '@/lib/utils';
-import type { Project, TokenTransaction, Notification, PublicUser } from '@/types';
+import type { Project, Notification, PublicUser } from '@/types';
 
 interface DashboardPageProps {
   navigate: (path: string) => void;
@@ -50,7 +49,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
   }, [initialTab]);
 
   const [projects, setProjects] = useState<Project[]>([]);
-  const [txs, setTxs] = useState<TokenTransaction[]>([]);
   const [notifs, setNotifs] = useState<Notification[]>([]);
   const [selectedProject, setSelectedProject] = useState<Project | null>(null);
 
@@ -78,7 +76,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
     });
 
     setProjects(store.getProjects(user.id));
-    setTxs(store.getTransactions(user.id));
     setNotifs(store.getNotifications(user.id));
   };
 
@@ -146,7 +143,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
     { id: 'overview', label: 'Overview', icon: IconChart },
     { id: 'projects', label: t('myProjects'), icon: IconFolder },
     { id: 'new', label: t('newProject'), icon: IconPlus },
-    { id: 'wallet', label: t('tokenWallet'), icon: IconToken },
     { id: 'notifications', label: t('notifications'), icon: IconBell, count: unreadCount },
     { id: 'profile', label: t('profile'), icon: IconUser },
   ];
@@ -198,19 +194,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
             ))}
           </nav>
 
-          {/* Token Card */}
-          <div className="mt-8 rounded-2xl border border-violet-500/25 bg-gradient-to-br from-violet-500/15 to-blue-500/10 p-5 space-y-1">
-            <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-wider text-[var(--color-orchid)]">
-              <IconToken className="h-3.5 w-3.5" /> Platform Tokens
-            </span>
-            <p className="font-display text-3xl font-extrabold text-[var(--color-ink)]">
-              {sessionUser.tokenBalance}
-            </p>
-            <p className="text-[11px] text-[var(--color-muted)]">
-              Inquiries are always free. Token credits apply to priority scopes.
-            </p>
-          </div>
-
           {/* Official Community Link */}
           <a
             href={OFFICIAL_CHANNELS.discord}
@@ -255,9 +238,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
               <span className="font-display text-xs font-bold tracking-wider">THE CREATORS</span>
             </button>
             <div className="flex items-center gap-2">
-              <span className="rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)] px-2 py-1 font-mono text-xs">
-                {sessionUser.tokenBalance} tok
-              </span>
               <button type="button" onClick={handleLogout} className="p-1.5 text-[var(--color-faint)]">
                 <IconLogout className="h-4 w-4" />
               </button>
@@ -300,10 +280,6 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
               {/* Stats Grid */}
               <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
                 <div className="glass rounded-2xl p-5">
-                  <span className="text-xs uppercase tracking-wider text-[var(--color-faint)] block">Token Balance</span>
-                  <p className="mt-2 font-display text-3xl font-extrabold text-[var(--color-ink)]">{sessionUser.tokenBalance}</p>
-                </div>
-                <div className="glass rounded-2xl p-5">
                   <span className="text-xs uppercase tracking-wider text-[var(--color-faint)] block">Active Projects</span>
                   <p className="mt-2 font-display text-3xl font-extrabold text-blue-400">
                     {projects.filter((p) => ['approved', 'in_progress', 'delivered'].includes(p.status)).length}
@@ -312,6 +288,12 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
                 <div className="glass rounded-2xl p-5">
                   <span className="text-xs uppercase tracking-wider text-[var(--color-faint)] block">Total Briefs</span>
                   <p className="mt-2 font-display text-3xl font-extrabold text-[var(--color-ink)]">{projects.length}</p>
+                </div>
+                <div className="glass rounded-2xl p-5">
+                  <span className="text-xs uppercase tracking-wider text-[var(--color-faint)] block">Completed</span>
+                  <p className="mt-2 font-display text-3xl font-extrabold text-emerald-400">
+                    {projects.filter((p) => p.status === 'completed').length}
+                  </p>
                 </div>
                 <div className="glass rounded-2xl p-5">
                   <span className="text-xs uppercase tracking-wider text-[var(--color-faint)] block">Member Since</span>
@@ -502,60 +484,7 @@ export function DashboardPage({ navigate, initialTab = 'overview' }: DashboardPa
             </div>
           )}
 
-          {tab === 'wallet' && (
-            <div className="space-y-6">
-              <div>
-                <SectionLabel>Internal Credits</SectionLabel>
-                <h1 className="mt-2 font-display text-3xl font-bold text-[var(--color-ink)]">
-                  {t('tokenWallet')}
-                </h1>
-                <p className="mt-1 text-sm text-[var(--color-muted)]">
-                  Tokens are internal studio credits used for priority queue access and specialized services. Project inquiries are always free.
-                </p>
-              </div>
 
-              <div className="grid gap-4 sm:grid-cols-3">
-                <div className="glass rounded-2xl p-6">
-                  <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-faint)] block">Current Balance</span>
-                  <p className="mt-2 font-display text-3xl font-extrabold text-[var(--color-ink)]">{sessionUser.tokenBalance}</p>
-                </div>
-                <div className="glass rounded-2xl p-6">
-                  <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-faint)] block">Total Credited</span>
-                  <p className="mt-2 font-display text-3xl font-extrabold text-emerald-400">
-                    +{txs.filter((tItem) => tItem.amount > 0).reduce((acc, curr) => acc + curr.amount, 0)}
-                  </p>
-                </div>
-                <div className="glass rounded-2xl p-6">
-                  <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-faint)] block">Ledger Records</span>
-                  <p className="mt-2 font-display text-3xl font-extrabold text-[var(--color-orchid)]">{txs.length}</p>
-                </div>
-              </div>
-
-              {/* Transactions Ledger */}
-              <div className="glass rounded-2xl border border-[var(--color-line)] overflow-hidden">
-                <div className="border-b border-[var(--color-line)] p-4 font-mono text-xs font-semibold uppercase tracking-wider text-[var(--color-orchid)]">
-                  Token Transaction Ledger
-                </div>
-                {txs.length === 0 ? (
-                  <p className="p-8 text-center text-xs text-[var(--color-faint)]">No transaction records found.</p>
-                ) : (
-                  <div className="divide-y divide-[var(--color-line)]">
-                    {txs.map((tx) => (
-                      <div key={tx.id} className="flex items-center justify-between p-4 text-xs">
-                        <div>
-                          <p className="font-medium text-[var(--color-ink)]">{tx.reason}</p>
-                          <span className="font-mono text-[10px] text-[var(--color-faint)]">{formatDate(tx.createdAt)}</span>
-                        </div>
-                        <span className={`font-mono text-sm font-bold ${tx.amount >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                          {tx.amount >= 0 ? `+${tx.amount}` : tx.amount} tok
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {tab === 'notifications' && (
             <div className="space-y-6">

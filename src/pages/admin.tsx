@@ -20,7 +20,6 @@ import {
   IconShield,
   IconFolder,
   IconUser,
-  IconToken,
   IconCheck,
   IconX,
   IconSearch,
@@ -40,7 +39,6 @@ import {
   fetchAdminUsers,
   updateAdminUserStatus,
   updateAdminUserRole,
-  adjustAdminUserTokens,
   generateAdminPasswordResetLink,
   fetchAdminProjects,
   updateAdminProject,
@@ -173,10 +171,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
   const [roleChangeUser, setRoleChangeUser] = useState<AdminUserItem | null>(null);
   const [newRole, setNewRole] = useState<'client' | 'admin'>('client');
   const [roleLoading, setRoleLoading] = useState(false);
-  const [tokenAdjustUser, setTokenAdjustUser] = useState<AdminUserItem | null>(null);
-  const [tokenAmount, setTokenAmount] = useState<number>(50);
-  const [tokenReason, setTokenReason] = useState<string>('');
-  const [tokenLoading, setTokenLoading] = useState(false);
   const [resetModalUser, setResetModalUser] = useState<AdminUserItem | null>(null);
   const [resetResult, setResetResult] = useState<{ resetToken: string; resetPath: string; expiresInMinutes: number } | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
@@ -343,33 +337,7 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
     }
   };
 
-  // Adjust User Credits
-  const handleExecuteTokenAdjustment = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!tokenAdjustUser) return;
-    if (tokenAmount === 0 || isNaN(tokenAmount)) {
-      push('error', 'Token adjustment amount must be a non-zero integer.');
-      return;
-    }
-    if (!tokenReason.trim()) {
-      push('error', 'A specific reason is required for audit recording.');
-      return;
-    }
 
-    setTokenLoading(true);
-    try {
-      const res = await adjustAdminUserTokens(tokenAdjustUser.id, tokenAmount, tokenReason.trim());
-      push('success', res.message);
-      setTokenAdjustUser(null);
-      setTokenReason('');
-      loadUsers(usersPagination.page);
-      if (tab === 'overview') loadStats();
-    } catch (err: unknown) {
-      push('error', err instanceof Error ? err.message : 'Failed to adjust user credits.');
-    } finally {
-      setTokenLoading(false);
-    }
-  };
 
   // Generate Password Reset Link
   const handleExecutePasswordResetLink = async () => {
@@ -682,19 +650,19 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                 </div>
               </div>
 
-              {/* Credits In Circulation */}
+              {/* Active Accounts */}
               <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/40 p-5 backdrop-blur-sm">
                 <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">In Circulation</span>
-                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-amber-500/10 text-amber-400">
-                    <IconToken className="h-4 w-4" />
+                  <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">Active Accounts</span>
+                  <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-400">
+                    <IconCheck className="h-4 w-4" />
                   </div>
                 </div>
-                <div className="mt-3 font-mono text-3xl font-bold tracking-tight text-amber-300">
-                  {statsLoading ? <Spinner className="h-7 w-7" /> : (stats?.tokensInCirculation ?? 0).toLocaleString()}
+                <div className="mt-3 font-mono text-3xl font-bold tracking-tight text-emerald-300">
+                  {statsLoading ? <Spinner className="h-7 w-7" /> : stats?.activeUsers ?? '—'}
                 </div>
                 <div className="mt-2 text-xs text-[var(--color-faint)] font-mono">
-                  Total client token reserves
+                  Verified active client accounts
                 </div>
               </div>
 
@@ -880,7 +848,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                       <th className="px-5 py-3.5">User</th>
                       <th className="px-4 py-3.5">Role</th>
                       <th className="px-4 py-3.5">Provider</th>
-                      <th className="px-4 py-3.5">Credits</th>
                       <th className="px-4 py-3.5">Status</th>
                       <th className="px-4 py-3.5">Created</th>
                       <th className="px-5 py-3.5 text-right">Actions</th>
@@ -889,13 +856,13 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                   <tbody className="divide-y divide-[var(--color-line)]">
                     {usersLoading ? (
                       <tr>
-                        <td colSpan={7} className="px-5 py-12 text-center text-sm text-[var(--color-faint)]">
+                        <td colSpan={6} className="px-5 py-12 text-center text-sm text-[var(--color-faint)]">
                           <Spinner className="mx-auto mb-2" /> Loading registered users from PostgreSQL...
                         </td>
                       </tr>
                     ) : users.length === 0 ? (
                       <tr>
-                        <td colSpan={7} className="px-5 py-12">
+                        <td colSpan={6} className="px-5 py-12">
                           <EmptyState icon={<IconUser className="h-6 w-6" />} title="No Users Found" body="No user accounts match the current filter and search criteria." />
                         </td>
                       </tr>
@@ -961,10 +928,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                               </span>
                             </td>
 
-                            <td className="px-4 py-4 whitespace-nowrap font-mono text-sm font-semibold text-amber-300">
-                              {u.tokenBalance.toLocaleString()}
-                            </td>
-
                             <td className="px-4 py-4 whitespace-nowrap">
                               {u.suspended ? (
                                 <span className="inline-flex items-center gap-1 rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 font-mono text-[11px] text-rose-400">
@@ -992,19 +955,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                                   title="View User Details"
                                 >
                                   Details
-                                </Button>
-
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => {
-                                    setTokenAdjustUser(u);
-                                    setTokenAmount(50);
-                                    setTokenReason('');
-                                  }}
-                                  title="Adjust User Credits"
-                                >
-                                  Credits
                                 </Button>
 
                                 <Button
@@ -1563,8 +1513,8 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
               </div>
 
               <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)] p-2.5">
-                <span className="text-[var(--color-muted)] text-[10px] block uppercase">Credits Balance</span>
-                <span className="text-amber-400 font-bold">{detailUser.tokenBalance.toLocaleString()} tokens</span>
+                <span className="text-[var(--color-muted)] text-[10px] block uppercase">Role</span>
+                <span className="text-[var(--color-ink)] font-bold uppercase">{detailUser.role}</span>
               </div>
 
               <div className="rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)] p-2.5">
@@ -1681,51 +1631,7 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
         )}
       </Modal>
 
-      {/* 4. Adjust Credits Modal */}
-      <Modal
-        open={Boolean(tokenAdjustUser)}
-        onClose={() => setTokenAdjustUser(null)}
-        title="Adjust Client Token Reserve"
-      >
-        {tokenAdjustUser && (
-          <form onSubmit={handleExecuteTokenAdjustment} className="space-y-4">
-            <p className="text-sm text-[var(--color-muted)]">
-              Adjust token reserves for <strong className="text-[var(--color-ink)]">{tokenAdjustUser.name}</strong>. Current balance:{' '}
-              <span className="font-mono font-bold text-amber-400">{tokenAdjustUser.tokenBalance.toLocaleString()}</span>.
-            </p>
 
-            <Field label="Amount to Adjust" hint="Use positive numbers to add, negative to deduct">
-              <Input
-                type="number"
-                step="1"
-                value={tokenAmount}
-                onChange={(e) => setTokenAmount(parseInt(e.target.value, 10) || 0)}
-                placeholder="e.g. 50 or -50"
-                required
-              />
-            </Field>
-
-            <Field label="Reason / Justification" hint="Required for immutable audit logging">
-              <Input
-                type="text"
-                value={tokenReason}
-                onChange={(e) => setTokenReason(e.target.value)}
-                placeholder="e.g. Approved project milestone, promotional reward, scope refund"
-                required
-              />
-            </Field>
-
-            <div className="flex justify-end gap-2 pt-4 border-t border-[var(--color-line)]">
-              <Button variant="ghost" size="sm" type="button" onClick={() => setTokenAdjustUser(null)}>
-                Cancel
-              </Button>
-              <Button variant="primary" size="sm" type="submit" loading={tokenLoading}>
-                Confirm Credit Adjustment
-              </Button>
-            </div>
-          </form>
-        )}
-      </Modal>
 
       {/* 5. Password Reset Link Modal */}
       <Modal

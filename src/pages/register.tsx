@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TcMonogram, IconArrow, IconCheck, IconFolder, IconToken, IconBell } from '@/components/icons';
+import { TcMonogram, IconArrow, IconCheck, IconFolder, IconBell } from '@/components/icons';
 import { Button, Field, Input } from '@/components/ui';
 import { GoogleSignInButton } from '@/components/google-sign-in';
 import { useToast } from '@/components/toast';
@@ -48,7 +48,7 @@ export function RegisterPage({ navigate }: RegisterPageProps) {
       });
 
       if (res.success && res.user) {
-        push('success', `Account created! 100 welcome tokens credited.`);
+        push('success', `Account created successfully! Welcome to The Creators.`);
         navigate('/dashboard');
       } else {
         push('error', res.error || 'Registration failed.');
@@ -106,11 +106,11 @@ export function RegisterPage({ navigate }: RegisterPageProps) {
 
             <li className="flex items-start gap-3.5 text-sm text-[var(--color-ink)]">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-500/15 text-blue-400">
-                <IconToken className="h-4.5 w-4.5" />
+                <IconCheck className="h-4.5 w-4.5" />
               </span>
               <div>
-                <strong className="block text-[var(--color-ink)]">100 Welcome Tokens</strong>
-                <span className="text-xs text-[var(--color-muted)]">Automatically credited upon signup. Inquiries and briefs are always free.</span>
+                <strong className="block text-[var(--color-ink)]">Dedicated Client Portal</strong>
+                <span className="text-xs text-[var(--color-muted)]">Real-time milestone tracking, deliverable drops, and direct updates.</span>
               </div>
             </li>
 

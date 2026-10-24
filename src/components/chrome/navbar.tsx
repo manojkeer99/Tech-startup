@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { TcMonogram, IconMenu, IconX, IconToken, IconUser, IconShield, IconArrow } from '../icons';
+import { TcMonogram, IconMenu, IconX, IconUser, IconShield, IconArrow } from '../icons';
 import { ThemeToggle } from '../theme-toggle';
 import { LangToggle } from '../lang-toggle';
 import { useI18n } from '@/lib/i18n';
@@ -115,18 +115,6 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
 
           {sessionUser ? (
             <div className="flex items-center gap-2 border-l border-[var(--color-line)] pl-3">
-              {sessionUser.role === 'client' && (
-                <button
-                  type="button"
-                  onClick={() => handleLinkClick('/dashboard')}
-                  className="flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)] px-2.5 py-1.5 font-mono text-xs text-[var(--color-ink)] hover:border-[var(--color-violet)] transition cursor-pointer"
-                  title="Token wallet balance"
-                >
-                  <IconToken className="h-3.5 w-3.5 text-[var(--color-orchid)]" />
-                  <span>{sessionUser.tokenBalance}</span>
-                </button>
-              )}
-
               <button
                 type="button"
                 onClick={() => handleLinkClick(sessionUser.role === 'admin' ? '/admin' : '/dashboard')}
@@ -198,11 +186,6 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
         <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-5 shadow-2xl md:hidden animate-in slide-in-from-top duration-200">
           <div className="flex items-center justify-between pb-4 border-b border-[var(--color-line)]">
             <LangToggle />
-            {sessionUser && (
-              <span className="font-mono text-xs text-[var(--color-orchid)]">
-                {sessionUser.tokenBalance} tokens
-              </span>
-            )}
           </div>
 
           <div className="space-y-1.5 py-4">

@@ -25,7 +25,6 @@ const defaultAllowedOrigins = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'https://thecreators-studio.vercel.app',
-  'https://thecreators.onrender.com',
 ];
 
 if (rawFrontendUrl) defaultAllowedOrigins.push(rawFrontendUrl.replace(/\/$/, ''));
@@ -736,7 +735,7 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
           // 3. New public sign-up: Public Google sign-ups ALWAYS receive the ordinary 'client' role (never admin)
           const newUserId = `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
           const unusablePasswordHash = `*GOOGLE_AUTH_LOCKED*${crypto.randomBytes(32).toString('hex')}`;
-          const defaultTokens = 100;
+          const defaultTokens = 0;
 
           await query(
             `INSERT INTO users (id, name, email, google_id, avatar_url, role, token_balance, suspended, password_hash)
@@ -744,20 +743,12 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
             [newUserId, googleName, cleanEmail, googleId, avatarUrl, defaultTokens, unusablePasswordHash]
           );
 
-          // Credit welcome bonus tokens
-          const txId = `tx_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
-          await query(
-            `INSERT INTO token_transactions (id, client_id, amount, reason)
-             VALUES ($1, $2, $3, $4)`,
-            [txId, newUserId, defaultTokens, 'Welcome bonus upon verified Google registration to The Creators']
-          ).catch(() => {});
-
           // Welcome notification
           const notifId = `notif_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
           await query(
             `INSERT INTO user_notifications (id, user_id, title, body)
              VALUES ($1, $2, $3, $4)`,
-            [notifId, newUserId, 'Welcome to THE CREATORS', 'Your client dashboard is active. 100 welcome tokens have been credited to your wallet.']
+            [notifId, newUserId, 'Welcome to THE CREATORS', 'Your client dashboard is active. Submit project briefs and track milestones in real time.']
           ).catch(() => {});
 
           user = {
@@ -772,7 +763,7 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
             createdAt: new Date().toISOString(),
             passwordHash: unusablePasswordHash,
           };
-          logAudit(cleanEmail, 'auth.google_signup', 'New client registered via verified Google Identity (100 welcome tokens credited)');
+          logAudit(cleanEmail, 'auth.google_signup', 'New client registered via verified Google Identity');
         }
       }
     } catch (dbErr) {
@@ -846,21 +837,13 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
       const id = `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const pwHash = hashPassword(password);
-      const defaultTokens = 100;
+      const defaultTokens = 0;
 
       await query(
         `INSERT INTO users (id, name, email, phone, age, role, token_balance, suspended, password_hash)
          VALUES ($1, $2, $3, $4, $5, 'client', $6, false, $7)`,
         [id, name.trim(), cleanEmail, phone ? String(phone).trim() : null, age ? Number(age) : null, defaultTokens, pwHash]
       );
-
-      // Welcome transaction
-      const txId = `tx_${Date.now()}_${crypto.randomBytes(2).toString('hex')}`;
-      await query(
-        `INSERT INTO token_transactions (id, client_id, amount, reason)
-         VALUES ($1, $2, $3, $4)`,
-        [txId, id, defaultTokens, 'Welcome bonus upon registration to The Creators']
-      ).catch(() => {});
 
       newUser = {
         id,
@@ -893,7 +876,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       phone: phone ? String(phone).trim() : null,
       age: age ? Number(age) : null,
       role: 'client',
-      tokenBalance: 100,
+      tokenBalance: 0,
       suspended: false,
       googleId: null,
       avatarUrl: null,
@@ -905,13 +888,13 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 
   // Create persistent session
   await createUserSession(newUser, req, res);
-  logAudit(cleanEmail, 'auth.register', 'New client registered with 100 tokens');
+  logAudit(cleanEmail, 'auth.register', 'New client registered');
 
   const { passwordHash: _, ...publicUser } = newUser;
   return res.status(201).json({
     ok: true,
     user: publicUser,
-    message: `Welcome aboard, ${newUser.name.split(' ')[0]}! 100 welcome tokens have been credited.`,
+    message: `Welcome aboard, ${newUser.name.split(' ')[0]}! Your account is active.`,
   });
 });
 
@@ -1261,6 +1244,7 @@ app.post('/api/projects', async (req: Request, res: Response) => {
   const projectId = generateProjectId();
   const id = `proj_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   const updateId = `upd_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+
   const newProject: ServerProject = {
     id,
     projectId,
@@ -1284,13 +1268,15 @@ app.post('/api/projects', async (req: Request, res: Response) => {
     tokenCharged: 0,
     createdAt: now,
     updatedAt: now,
-    updates: [{
-      id: updateId,
-      authorName: 'The Creators Intake',
-      authorRole: 'admin',
-      message: 'Project brief received. Our team will review your specifications.',
-      createdAt: now,
-    }],
+    updates: [
+      {
+        id: updateId,
+        authorName: 'The Creators Intake',
+        authorRole: 'admin',
+        message: 'Project brief received. Our team will review your specifications.',
+        createdAt: now,
+      },
+    ],
   };
 
   if (isDbConfigured && pool) {
@@ -1304,11 +1290,29 @@ app.post('/api/projects', async (req: Request, res: Response) => {
            service, title, description, requirements, budget, deadline, references_text,
            attachments, extra, status, progress, token_charged
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19)`,
-        [id, projectId, newProject.clientId, clientName, clientEmail, newProject.clientPhone, newProject.age,
-          service, title, description, newProject.requirements, newProject.budget, newProject.deadline,
-          newProject.references, JSON.stringify(newProject.attachments), JSON.stringify(newProject.extra),
-          newProject.status, newProject.progress, newProject.tokenCharged]
+        [
+          id,
+          projectId,
+          newProject.clientId,
+          clientName,
+          clientEmail,
+          newProject.clientPhone,
+          newProject.age,
+          service,
+          title,
+          description,
+          newProject.requirements,
+          newProject.budget,
+          newProject.deadline,
+          newProject.references,
+          JSON.stringify(newProject.attachments),
+          JSON.stringify(newProject.extra),
+          newProject.status,
+          newProject.progress,
+          newProject.tokenCharged,
+        ]
       );
+
       await client.query(
         `INSERT INTO project_updates (id, project_id, author_name, author_role, message)
          VALUES ($1, $2, $3, $4, $5)`,
@@ -1319,7 +1323,6 @@ app.post('/api/projects', async (req: Request, res: Response) => {
       if (client) {
         try { await client.query('ROLLBACK'); } catch { /* preserve original database error */ }
       }
-      // Do not report success or silently fall back to memory when PostgreSQL is configured but fails.
       console.error('[Project Submission DB Error]:', err instanceof Error ? err.message : 'Unknown database error');
       return res.status(503).json({ error: 'Project request could not be saved right now. Please try again shortly.' });
     } finally {
@@ -1332,7 +1335,9 @@ app.post('/api/projects', async (req: Request, res: Response) => {
     MEMORY_PROJECTS.unshift(newProject);
   }
 
+  MEMORY_PROJECTS.unshift(newProject);
   logAudit(clientEmail, 'project.submit', `${projectId} (${service}) — ${title}`);
+
   return res.status(201).json({
     ok: true,
     projectId,
@@ -1440,10 +1445,9 @@ app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) =
           COUNT(*) AS total_users,
           COUNT(*) FILTER (WHERE role = 'client') AS total_clients,
           COUNT(*) FILTER (WHERE role = 'admin') AS total_admins,
-          COUNT(*) FILTER (WHERE NOT suspended) AS active_users,
+          COUNT(*) FILTER (WHERE not suspended) AS active_users,
           COUNT(*) FILTER (WHERE suspended) AS suspended_users,
-          COUNT(*) FILTER (WHERE google_id IS NOT NULL) AS google_users,
-          COALESCE(SUM(token_balance), 0) AS tokens_in_circulation
+          COUNT(*) FILTER (WHERE google_id IS NOT NULL) AS google_users
         FROM users
       `);
 
@@ -1492,7 +1496,6 @@ app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) =
           activeUsers: Number(uRow.active_users),
           suspendedUsers: Number(uRow.suspended_users),
           googleUsers: Number(uRow.google_users),
-          tokensInCirculation: Number(uRow.tokens_in_circulation),
           projects: Number(pRow.total_projects),
           byStatus: {
             submitted: Number(pRow.submitted),
@@ -1523,7 +1526,6 @@ app.get('/api/admin/stats', requireAdmin, async (_req: Request, res: Response) =
       activeUsers: MEMORY_USERS.filter((u) => !u.suspended).length,
       suspendedUsers: MEMORY_USERS.filter((u) => u.suspended).length,
       googleUsers: 0,
-      tokensInCirculation: clients.reduce((acc, c) => acc + c.tokenBalance, 0),
       projects: MEMORY_PROJECTS.length,
       byStatus: {
         submitted: MEMORY_PROJECTS.filter((p) => p.status === 'submitted').length,
@@ -1750,68 +1752,7 @@ app.patch('/api/admin/users/:id/role', requireAdmin, async (req: Request, res: R
   return res.status(503).json({ error: 'Database service unavailable.' });
 });
 
-app.post('/api/admin/users/:id/tokens', requireAdmin, async (req: Request, res: Response) => {
-  const targetUserId = req.params.id;
-  const { amount, reason } = req.body || {};
-  const adminActor = (req as Request & { user: ServerUser }).user;
 
-  const numAmount = parseInt(String(amount), 10);
-  if (isNaN(numAmount) || numAmount === 0) {
-    return res.status(400).json({ error: 'Amount must be a non-zero integer.' });
-  }
-
-  const cleanReason = String(reason || '').trim();
-  if (!cleanReason) {
-    return res.status(400).json({ error: 'A specific reason is required for token adjustments.' });
-  }
-
-  if (isDbConfigured && pool) {
-    const client = await pool.connect();
-    try {
-      await client.query('BEGIN');
-
-      const uRes = await client.query('SELECT id, email, token_balance FROM users WHERE id = $1 FOR UPDATE', [targetUserId]);
-      if (uRes.rows.length === 0) {
-        await client.query('ROLLBACK');
-        return res.status(404).json({ error: 'User not found.' });
-      }
-      const userRow = uRes.rows[0];
-      const newBalance = userRow.token_balance + numAmount;
-      if (newBalance < 0) {
-        await client.query('ROLLBACK');
-        return res.status(400).json({ error: `Insufficient user balance (${userRow.token_balance}) for this deduction.` });
-      }
-
-      await client.query('UPDATE users SET token_balance = $1 WHERE id = $2', [newBalance, targetUserId]);
-
-      const txId = `tx_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
-      await client.query(
-        'INSERT INTO token_transactions (id, client_id, amount, reason, created_by_id, created_at) VALUES ($1, $2, $3, $4, $5, NOW())',
-        [txId, targetUserId, numAmount, cleanReason, adminActor.id]
-      );
-
-      await client.query('COMMIT');
-
-      logAudit(adminActor.email, 'admin.tokens_adjust', `${userRow.email}: ${numAmount >= 0 ? '+' : ''}${numAmount} (Balance: ${newBalance}) — ${cleanReason}`);
-
-      return res.json({
-        ok: true,
-        userId: targetUserId,
-        tokenBalance: newBalance,
-        transactionId: txId,
-        message: `Credits successfully adjusted. New balance: ${newBalance}.`,
-      });
-    } catch (err) {
-      await client.query('ROLLBACK');
-      console.error('[Admin Token Adjustment Error]:', err);
-      return res.status(500).json({ error: 'Failed to adjust user credits.' });
-    } finally {
-      client.release();
-    }
-  }
-
-  return res.status(503).json({ error: 'Database service unavailable.' });
-});
 
 app.post('/api/admin/users/:id/reset-password', requireAdmin, async (req: Request, res: Response) => {
   const targetUserId = req.params.id;
@@ -2138,12 +2079,7 @@ app.post('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
     req.body.suspended = Boolean(suspended);
     return (app._router.handle as any)(req, res);
   }
-  if (action === 'tokens') {
-    req.params.id = clientId;
-    req.body.amount = amount;
-    req.body.reason = reason;
-    return (app._router.handle as any)(req, res);
-  }
+
   return res.status(400).json({ error: 'Unknown action.' });
 });
 

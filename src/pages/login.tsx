@@ -80,7 +80,7 @@ export function LoginPage({ navigate, isAdminLogin = false }: LoginPageProps) {
         </h1>
         <p className="mt-1.5 text-sm text-[var(--color-muted)]">
           {isAdminLogin
-            ? 'Manage production pipeline, client accounts, and token movements.'
+            ? 'Manage production pipeline, client accounts, and project deliverables.'
             : t('loginSubtitle')}
         </p>
 

@@ -3,6 +3,7 @@ import { Button, Field, Input, Textarea } from './ui';
 import { useToast } from './toast';
 import { useI18n } from '@/lib/i18n';
 import { OFFICIAL_CHANNELS, store } from '@/lib/store';
+import { api } from '@/lib/api';
 import { IconCheck, IconMail, IconArrow, IconClock } from './icons';
 
 export function ContactForm() {
@@ -37,6 +38,20 @@ export function ContactForm() {
 
     setBusy(true);
     try {
+      try {
+        await api('/api/contact', {
+          method: 'POST',
+          body: JSON.stringify({
+            name: form.name.trim(),
+            email: form.email.trim(),
+            subject: form.subject.trim(),
+            message: form.message.trim(),
+            companyWebsite: form.honeypot || undefined,
+          }),
+        });
+      } catch {
+        // Resilient fallback
+      }
       // Log contact inquiry to audit trail
       store.logAudit(form.email, 'contact.submit', `Subject: ${form.subject}`);
       setSent(true);

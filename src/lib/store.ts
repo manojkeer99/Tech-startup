@@ -714,6 +714,14 @@ class AppStore {
     return newProject;
   }
 
+  public addProject(p: Project): void {
+    if (!this.projects.some((x) => x.id === p.id || x.projectId === p.projectId)) {
+      this.projects.unshift(p);
+      this.saveProjects();
+      this.emit();
+    }
+  }
+
   public updateProject(
     projectId: string,
     updates: {
@@ -805,45 +813,9 @@ class AppStore {
     return true;
   }
 
-  public adjustTokens(userId: string, amount: number, reason: string, actorName: string): boolean {
-    const u = this.users.find((x) => x.id === userId);
-    if (!u) return false;
-    if (u.tokenBalance + amount < 0) return false;
-
-    u.tokenBalance += amount;
-    this.saveUsers();
-
-    const tx: TokenTransaction = {
-      id: `tx_${Date.now()}`,
-      clientId: u.id,
-      clientName: u.name,
-      clientEmail: u.email,
-      amount,
-      reason: `${reason} (by ${actorName})`,
-      createdAt: new Date().toISOString(),
-    };
-    this.txs.unshift(tx);
-    this.saveTxs();
-
-    this.notifs.unshift({
-      id: `notif_${Date.now()}`,
-      userId: u.id,
-      title: amount >= 0 ? 'Tokens Credited' : 'Tokens Deducted',
-      body: `${amount >= 0 ? '+' : ''}${amount} tokens — ${reason}`,
-      read: false,
-      createdAt: new Date().toISOString(),
-    });
-    this.saveNotifs();
-
-    this.logAudit(actorName, 'tokens.adjust', `${u.email}: ${amount >= 0 ? '+' : ''}${amount} (${reason})`);
-    this.emit();
-    return true;
-  }
-
   // Token Transactions
-  public getTransactions(clientId?: string): TokenTransaction[] {
-    if (!clientId) return [...this.txs];
-    return this.txs.filter((t) => t.clientId === clientId);
+  public getTransactions(_clientId?: string): TokenTransaction[] {
+    return [];
   }
 
   // Notifications
