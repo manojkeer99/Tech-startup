@@ -75,7 +75,7 @@ export function CountUp({ to, suffix = '', duration = 1.4 }: { to: number; suffi
   const inView = useInView(ref, { once: true, margin: '-40px' });
   const mv = useMotionValue(0);
   const spring = useSpring(mv, { duration: duration * 1000, bounce: 0 });
-  const [val, setVal] = useState(0);
+  const [val, setVal] = useState(to);
 
   useEffect(() => {
     if (!inView) return;
