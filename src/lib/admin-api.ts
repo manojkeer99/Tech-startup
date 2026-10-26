@@ -147,6 +147,27 @@ export interface AdminLogsResponse {
   offset: number;
 }
 
+
+export interface AdminContactInquiry {
+  id: string;
+  name: string;
+  email: string;
+  subject: string;
+  message: string;
+  created_at: string;
+}
+
+export interface AdminContactInquiriesResponse {
+  ok: boolean;
+  inquiries: AdminContactInquiry[];
+  pagination: PaginationMeta;
+}
+
+export async function fetchAdminContactInquiries(page = 1, limit = 20): Promise<AdminContactInquiriesResponse> {
+  const query = new URLSearchParams({ page: String(page), limit: String(limit) });
+  return api<AdminContactInquiriesResponse>(`/api/admin/contact-inquiries?${query.toString()}`);
+}
+
 export interface AdminSystemInfo {
   serverTime: string;
   uptimeSeconds: number;

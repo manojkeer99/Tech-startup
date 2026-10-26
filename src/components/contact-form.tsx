@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Button, Field, Input, Textarea } from './ui';
 import { useToast } from './toast';
 import { useI18n } from '@/lib/i18n';
-import { OFFICIAL_CHANNELS, store } from '@/lib/store';
+import { OFFICIAL_CHANNELS } from '@/lib/store';
 import { api } from '@/lib/api';
 import { IconCheck, IconMail, IconArrow, IconClock } from './icons';
 
@@ -38,26 +38,23 @@ export function ContactForm() {
 
     setBusy(true);
     try {
-      try {
-        await api('/api/contact', {
-          method: 'POST',
-          body: JSON.stringify({
-            name: form.name.trim(),
-            email: form.email.trim(),
-            subject: form.subject.trim(),
-            message: form.message.trim(),
-            companyWebsite: form.honeypot || undefined,
-          }),
-        });
-      } catch {
-        // Resilient fallback
+      const result = await api<{ ok: boolean; message?: string }>('/api/contact', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: form.name.trim(),
+          email: form.email.trim(),
+          subject: form.subject.trim(),
+          message: form.message.trim(),
+          companyWebsite: form.honeypot || undefined,
+        }),
+      });
+      if (!result?.ok) {
+        throw new Error(result?.message || 'The inquiry could not be saved.');
       }
-      // Log contact inquiry to audit trail
-      store.logAudit(form.email, 'contact.submit', `Subject: ${form.subject}`);
       setSent(true);
       push('success', t('messageSent'));
-    } catch {
-      push('error', 'Could not send message. Please email directly.');
+    } catch (err) {
+      push('error', err instanceof Error ? err.message : 'Could not save your inquiry. Please email directly.');
     } finally {
       setBusy(false);
     }
@@ -73,7 +70,7 @@ export function ContactForm() {
           {t('messageSent')}
         </h3>
         <p className="mt-2 text-sm text-[var(--color-muted)] max-w-sm mx-auto">
-          Our team monitors incoming messages and responds personally via email within 24 hours.
+          Your inquiry has been recorded. Our team will review it and respond using the email you provided.
         </p>
         <Button
           type="button"

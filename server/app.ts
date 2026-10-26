@@ -501,34 +501,54 @@ app.get('/api/services', (_req: Request, res: Response) => {
 /*                               CONTACT FORM                                 */
 /* -------------------------------------------------------------------------- */
 
-app.post('/api/contact', (req: Request, res: Response) => {
+app.post('/api/contact', async (req: Request, res: Response) => {
   const { name, email, subject, message, companyWebsite } = req.body || {};
 
-  // Honeypot check
-  if (companyWebsite) {
+  // Honeypot: return a generic success response without storing bot submissions.
+  if (typeof companyWebsite === 'string' && companyWebsite.trim()) {
     return res.json({ ok: true, message: 'Message received.' });
   }
 
-  if (!name || typeof name !== 'string' || name.trim().length < 2) {
-    return res.status(400).json({ error: 'Please enter your name.' });
+  const cleanName = typeof name === 'string' ? name.trim() : '';
+  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
+  const cleanSubject = typeof subject === 'string' ? subject.trim() : '';
+  const cleanMessage = typeof message === 'string' ? message.trim() : '';
+  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  if (cleanName.length < 2 || cleanName.length > 120) {
+    return res.status(400).json({ error: 'Please enter a name between 2 and 120 characters.' });
   }
-  if (!email || typeof email !== 'string' || !email.includes('@')) {
+  if (cleanEmail.length > 255 || !emailPattern.test(cleanEmail)) {
     return res.status(400).json({ error: 'Please enter a valid email address.' });
   }
-  if (!subject || typeof subject !== 'string' || subject.trim().length < 3) {
-    return res.status(400).json({ error: 'Please enter a subject.' });
+  if (cleanSubject.length < 3 || cleanSubject.length > 255) {
+    return res.status(400).json({ error: 'Please enter a subject between 3 and 255 characters.' });
   }
-  if (!message || typeof message !== 'string' || message.trim().length < 15) {
-    return res.status(400).json({ error: 'Please enter a message of at least 15 characters.' });
+  if (cleanMessage.length < 15 || cleanMessage.length > 10000) {
+    return res.status(400).json({ error: 'Please enter a message between 15 and 10000 characters.' });
   }
 
-  logAudit(email.trim().toLowerCase(), 'contact.inquiry', `Subject: ${subject.trim()}`);
+  // A contact submission is successful only after durable database storage succeeds.
+  if (!isDbConfigured) {
+    return res.status(503).json({ error: 'Contact submissions are temporarily unavailable. Please email us directly.' });
+  }
 
-  return res.json({
-    ok: true,
-    message: 'Your inquiry has been received. Our team will get back to you within 24 hours.',
-    fallbackEmail: 'thecreators.pvt.ltd@gmail.com',
-  });
+  const id = `inq_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
+  try {
+    await query(
+      'INSERT INTO contact_inquiries (id, name, email, subject, message) VALUES ($1, $2, $3, $4, $5)',
+      [id, cleanName, cleanEmail, cleanSubject, cleanMessage]
+    );
+    logAudit(cleanEmail, 'contact.inquiry', `Subject: ${cleanSubject}`);
+    return res.status(201).json({
+      ok: true,
+      message: 'Your inquiry has been recorded. Our team will review it and respond using the email you provided.',
+      inquiryId: id,
+    });
+  } catch (err) {
+    console.error('[Contact Inquiry Save Error]:', err instanceof Error ? err.message : 'Unknown database error');
+    return res.status(500).json({ error: 'We could not save your inquiry right now. Please try again or email us directly.' });
+  }
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2000,6 +2020,33 @@ app.delete('/api/admin/projects/:id', requireAdmin, async (req: Request, res: Re
     return res.json({ ok: true, message: `Project ${deleted.projectId} deleted.` });
   }
   return res.status(404).json({ error: 'Project not found.' });
+});
+
+app.get('/api/admin/contact-inquiries', requireAdmin, async (req: Request, res: Response) => {
+  if (!isDbConfigured) {
+    return res.status(503).json({ error: 'Contact inquiry storage is unavailable because the database is not configured.' });
+  }
+
+  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
+  const offset = (page - 1) * limit;
+
+  try {
+    const countRes = await query('SELECT COUNT(*) AS total FROM contact_inquiries');
+    const inquiriesRes = await query(
+      'SELECT id, name, email, subject, message, created_at FROM contact_inquiries ORDER BY created_at DESC LIMIT $1 OFFSET $2',
+      [limit, offset]
+    );
+    const total = parseInt(countRes.rows[0]?.total || '0', 10);
+    return res.json({
+      ok: true,
+      inquiries: inquiriesRes.rows,
+      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
+    });
+  } catch (err) {
+    console.error('[Admin Contact Inquiries Query Error]:', err instanceof Error ? err.message : 'Unknown database error');
+    return res.status(500).json({ error: 'Failed to fetch contact inquiries.' });
+  }
 });
 
 app.get('/api/admin/logs', requireAdmin, async (req: Request, res: Response) => {

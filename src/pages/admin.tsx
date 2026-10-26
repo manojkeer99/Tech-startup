@@ -30,6 +30,7 @@ import {
   IconLogout,
   IconCpu,
   IconChart,
+  IconMail,
 } from '@/components/icons';
 import { formatDate, timeAgo } from '@/lib/utils';
 import type { Project, ProjectStatus, PublicUser, AuditLog } from '@/types';
@@ -44,10 +45,12 @@ import {
   updateAdminProject,
   deleteAdminProject,
   fetchAdminLogs,
+  fetchAdminContactInquiries,
   fetchAdminSystemStatus,
   type AdminStats,
   type AdminUserItem,
   type AdminSystemInfo,
+  type AdminContactInquiry,
   type PaginationMeta,
 } from '@/lib/admin-api';
 
@@ -56,7 +59,7 @@ interface AdminPageProps {
   initialTab?: string;
 }
 
-type TabKey = 'overview' | 'users' | 'projects' | 'logs' | 'system';
+type TabKey = 'overview' | 'users' | 'projects' | 'inquiries' | 'logs' | 'system';
 
 export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps) {
   const { push } = useToast();
@@ -64,7 +67,7 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
 
   // Active navigation tab
   const [tab, setTab] = useState<TabKey>(() => {
-    const validTabs: TabKey[] = ['overview', 'users', 'projects', 'logs', 'system'];
+    const validTabs: TabKey[] = ['overview', 'users', 'projects', 'inquiries', 'logs', 'system'];
     return validTabs.includes(initialTab as TabKey) ? (initialTab as TabKey) : 'overview';
   });
 
@@ -238,6 +241,28 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
   }, [projectSearch, projectStatusFilter, projectsPagination.limit]);
 
   /* -------------------------------------------------------------------------- */
+  /*                         CONTACT INQUIRIES STATE                           */
+  /* -------------------------------------------------------------------------- */
+  const [inquiries, setInquiries] = useState<AdminContactInquiry[]>([]);
+  const [inquiriesLoading, setInquiriesLoading] = useState(false);
+  const [inquiriesError, setInquiriesError] = useState<string | null>(null);
+  const [inquiriesTotal, setInquiriesTotal] = useState(0);
+
+  const loadInquiries = useCallback(async () => {
+    setInquiriesLoading(true);
+    setInquiriesError(null);
+    try {
+      const res = await fetchAdminContactInquiries(1, 100);
+      setInquiries(res.inquiries);
+      setInquiriesTotal(res.pagination.total);
+    } catch (err: unknown) {
+      setInquiriesError(err instanceof Error ? err.message : 'Failed to load contact inquiries.');
+    } finally {
+      setInquiriesLoading(false);
+    }
+  }, []);
+
+  /* -------------------------------------------------------------------------- */
   /*                          TAB 4: ACTIVITY LOGS STATE                        */
   /* -------------------------------------------------------------------------- */
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -290,12 +315,14 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
       loadUsers(1);
     } else if (tab === 'projects') {
       loadProjects(1);
+    } else if (tab === 'inquiries') {
+      loadInquiries();
     } else if (tab === 'logs') {
       loadLogs();
     } else if (tab === 'system') {
       loadSystemInfo();
     }
-  }, [tab, currentUser, loadStats, loadUsers, loadProjects, loadLogs, loadSystemInfo]);
+  }, [tab, currentUser, loadStats, loadUsers, loadProjects, loadInquiries, loadLogs, loadSystemInfo]);
 
   /* -------------------------------------------------------------------------- */
   /*                              ACTION HANDLERS                               */
@@ -556,6 +583,21 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                 <span className="rounded-full bg-[var(--color-raise)] px-1.5 py-0.2 font-mono text-[10px] text-[var(--color-muted)]">
                   {stats.projects}
                 </span>
+              )}
+            </button>
+
+            <button
+              onClick={() => handleTabChange('inquiries')}
+              className={`flex items-center gap-2 rounded-lg px-3.5 py-2 transition whitespace-nowrap cursor-pointer ${
+                tab === 'inquiries'
+                  ? 'bg-violet-600/15 text-violet-300 border border-violet-500/30'
+                  : 'text-[var(--color-muted)] hover:text-[var(--color-ink)] hover:bg-[var(--color-raise)]'
+              }`}
+            >
+              <IconMail className="h-4 w-4 shrink-0" />
+              Contact Inquiries
+              {inquiriesTotal > 0 && (
+                <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-mono text-violet-300">{inquiriesTotal}</span>
               )}
             </button>
 
@@ -1224,6 +1266,76 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* CONTACT INQUIRIES                                                    */}
+        {/* ==================================================================== */}
+        {tab === 'inquiries' && (
+          <div className="space-y-6">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[var(--color-ink)]">
+                  Contact Inquiries
+                </h1>
+                <p className="mt-1 text-sm text-[var(--color-muted)]">
+                  Messages submitted through the public contact form, stored in PostgreSQL.
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={loadInquiries} loading={inquiriesLoading}>
+                Refresh Inquiries
+              </Button>
+            </div>
+
+            {inquiriesError && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300 flex items-center justify-between gap-3">
+                <span>{inquiriesError}</span>
+                <Button variant="danger" size="sm" onClick={loadInquiries}>Retry</Button>
+              </div>
+            )}
+
+            {inquiriesLoading && inquiries.length === 0 ? (
+              <div className="py-16 text-center text-sm text-[var(--color-faint)]">
+                <Spinner className="mx-auto mb-3" /> Loading contact inquiries...
+              </div>
+            ) : inquiries.length === 0 ? (
+              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/20 p-8">
+                <EmptyState icon={<IconMail className="h-6 w-6" />} title="No Contact Inquiries Yet" body="New valid contact-form submissions will appear here after database storage is configured." />
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {inquiries.map((inquiry) => (
+                  <article key={inquiry.id} className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/20 p-5 sm:p-6">
+                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="min-w-0">
+                        <h2 className="break-words font-semibold text-[var(--color-ink)]">{inquiry.subject}</h2>
+                        <p className="mt-1 text-sm text-[var(--color-muted)]">
+                          <span className="font-medium text-[var(--color-ink)]">{inquiry.name}</span>
+                          {' · '}
+                          <a className="text-violet-300 hover:underline" href={`mailto:${encodeURIComponent(inquiry.email)}`}>{inquiry.email}</a>
+                        </p>
+                      </div>
+                      <time className="shrink-0 text-xs text-[var(--color-muted)]" dateTime={inquiry.created_at}>
+                        {formatDate(inquiry.created_at)} · {timeAgo(inquiry.created_at)}
+                      </time>
+                    </div>
+                    <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-7 text-[var(--color-ink)]">{inquiry.message}</p>
+                    <div className="mt-4 border-t border-[var(--color-line)] pt-3">
+                      <a
+                        href={`mailto:${encodeURIComponent(inquiry.email)}?subject=${encodeURIComponent(`Re: ${inquiry.subject}`)}`}
+                        className="inline-flex items-center gap-2 text-sm font-medium text-violet-300 hover:underline"
+                      >
+                        <IconMail className="h-4 w-4" /> Reply by email
+                      </a>
+                    </div>
+                  </article>
+                ))}
+                <p className="text-xs font-mono text-[var(--color-muted)]">
+                  Showing {inquiries.length} of {inquiriesTotal} stored inquiries (newest first).
+                </p>
+              </div>
+            )}
           </div>
         )}
 
