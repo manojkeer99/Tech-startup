@@ -12,7 +12,7 @@ import type {
   Attachment,
 } from '@/types';
 import { SERVICE_DEFINITIONS } from './service-meta';
-import { api } from './api';
+import { api, ApiError } from './api';
 
 // Keys
 const STORAGE_PREFIX = 'tc_store_v4_';
@@ -208,6 +208,8 @@ class AppStore {
   private logs: AuditLog[] = [];
   private resets: PasswordResetToken[] = [];
   private sessionUser: PublicUser | null = null;
+  private sessionChecked = false;
+  private sessionCheckPromise: Promise<PublicUser | null> | null = null;
   private listeners: Set<() => void> = new Set();
 
   constructor() {
@@ -278,14 +280,12 @@ class AppStore {
         this.resets = JSON.parse(storedResets);
       }
 
-      // Session
+      // Session: restore cached public user profile metadata to prevent UI flicker while server session is verified
       const storedSession = localStorage.getItem(SESSION_KEY);
       if (storedSession) {
-        const parsed = JSON.parse(storedSession);
-        // Verify user still exists in memory
-        const u = this.users.find((x) => x.id === parsed.id);
-        if (u && !u.suspended) {
-          this.sessionUser = sanitizePublicUser(u);
+        const parsed = JSON.parse(storedSession) as PublicUser;
+        if (parsed && typeof parsed.id === 'string' && typeof parsed.email === 'string' && !parsed.suspended) {
+          this.sessionUser = parsed;
         } else {
           this.sessionUser = null;
           localStorage.removeItem(SESSION_KEY);
@@ -301,6 +301,59 @@ class AppStore {
 
     // Proactively validate and sync server-managed persistent session on startup
     this.checkSession().catch(() => {});
+  }
+
+  public isSessionChecked(): boolean {
+    return this.sessionChecked;
+  }
+
+  private setSessionUserInternal(user: PublicUser | null) {
+    this.sessionUser = user;
+    try {
+      if (user) {
+        localStorage.setItem(SESSION_KEY, JSON.stringify(user));
+        const existing = this.users.find((u) => u.id === user.id || u.email.toLowerCase() === user.email.toLowerCase());
+        if (!existing) {
+          this.users.unshift({
+            ...user,
+            passwordHash: '',
+            authProvider: user.googleId ? 'google' : 'email',
+          });
+          this.saveUsers();
+        } else {
+          Object.assign(existing, user);
+          this.saveUsers();
+        }
+      } else {
+        localStorage.removeItem(SESSION_KEY);
+      }
+    } catch {
+      // Ignore storage quota errors
+    }
+  }
+
+  public async syncServerProjects(): Promise<void> {
+    if (!this.sessionUser) return;
+    try {
+      const res = await api<{ ok: boolean; projects: Project[] }>('/api/projects');
+      if (res && res.ok && Array.isArray(res.projects)) {
+        const byId = new Map<string, Project>();
+        for (const srvProj of res.projects) {
+          byId.set(srvProj.projectId || srvProj.id, srvProj);
+        }
+        for (const locProj of this.projects) {
+          const key = locProj.projectId || locProj.id;
+          if (!byId.has(key)) {
+            byId.set(key, locProj);
+          }
+        }
+        this.projects = Array.from(byId.values());
+        this.saveProjects();
+        this.emit();
+      }
+    } catch {
+      // Ignore offline/network errors during background project sync
+    }
   }
 
   public subscribe(cb: () => void): () => void {
@@ -369,7 +422,11 @@ class AppStore {
   }
 
   // Auth Methods
-  public async login(email: string, passwordPlain: string): Promise<{ success: boolean; user?: PublicUser; error?: string }> {
+  public async login(
+    email: string,
+    passwordPlain: string,
+    turnstileToken?: string | null
+  ): Promise<{ success: boolean; user?: PublicUser; error?: string }> {
     const cleanEmail = email.trim().toLowerCase();
     if (!cleanEmail || !passwordPlain) {
       return { success: false, error: 'Email and password are required.' };
@@ -378,13 +435,19 @@ class AppStore {
     try {
       const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email: cleanEmail, password: passwordPlain }),
+        body: JSON.stringify({
+          email: cleanEmail,
+          password: passwordPlain,
+          ...(turnstileToken ? { turnstileToken } : {}),
+        }),
       });
 
       if (res && res.ok && res.user) {
-        this.sessionUser = res.user;
+        this.setSessionUserInternal(res.user);
+        this.sessionChecked = true;
         this.logAudit(cleanEmail, 'auth.login_success', `Role: ${res.user.role}`);
         this.emit();
+        this.syncServerProjects().catch(() => {});
         return { success: true, user: res.user };
       }
       return { success: false, error: 'Invalid email or password.' };
@@ -401,6 +464,7 @@ class AppStore {
     passwordPlain: string;
     phone?: string;
     age?: number;
+    turnstileToken?: string | null;
   }): Promise<{ success: boolean; user?: PublicUser; error?: string }> {
     const cleanEmail = params.email.trim().toLowerCase();
     const cleanName = params.name.trim();
@@ -424,13 +488,16 @@ class AppStore {
           password: params.passwordPlain,
           phone: params.phone?.trim() || null,
           age: params.age ?? null,
+          ...(params.turnstileToken ? { turnstileToken: params.turnstileToken } : {}),
         }),
       });
 
       if (res && res.ok && res.user) {
-        this.sessionUser = res.user;
+        this.setSessionUserInternal(res.user);
+        this.sessionChecked = true;
         this.logAudit(cleanEmail, 'auth.register', `Role: ${res.user.role}`);
         this.emit();
+        this.syncServerProjects().catch(() => {});
         return { success: true, user: res.user };
       }
       return { success: false, error: 'Registration failed.' };
@@ -444,12 +511,14 @@ class AppStore {
     if (this.sessionUser) {
       this.logAudit(this.sessionUser.email, 'auth.logout', 'User logged out');
     }
-    this.sessionUser = null;
-    try {
-      localStorage.removeItem(SESSION_KEY);
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-    } catch {}
+    this.setSessionUserInternal(null);
+    this.sessionChecked = true;
     this.emit();
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Ignore network errors after clearing client session state
+    }
   }
 
   public getSessionUser(): PublicUser | null {
@@ -498,16 +567,25 @@ class AppStore {
   }
 
   // Password Reset Flow
-  public async requestPasswordReset(email: string): Promise<{ success: boolean; token?: string; error?: string }> {
+  public async requestPasswordReset(
+    email: string,
+    turnstileToken?: string | null
+  ): Promise<{ success: boolean; token?: string; error?: string }> {
     const cleanEmail = email.trim().toLowerCase();
     try {
       await api<{ ok: boolean; message: string }>('/api/auth/forgot', {
         method: 'POST',
-        body: JSON.stringify({ email: cleanEmail }),
+        body: JSON.stringify({
+          email: cleanEmail,
+          ...(turnstileToken ? { turnstileToken } : {}),
+        }),
       });
       return { success: true };
-    } catch {
-      // Fallback
+    } catch (err: any) {
+      if (err instanceof ApiError || err?.message) {
+        return { success: false, error: err.message || 'Password reset request failed.' };
+      }
+      // Offline-only fallback
       const user = this.users.find((u) => u.email.toLowerCase() === cleanEmail);
       if (!user) {
         return { success: true };
@@ -531,7 +609,11 @@ class AppStore {
     }
   }
 
-  public async completePasswordReset(token: string, newPlain: string): Promise<{ success: boolean; error?: string }> {
+  public async completePasswordReset(
+    token: string,
+    newPlain: string,
+    turnstileToken?: string | null
+  ): Promise<{ success: boolean; error?: string }> {
     if (!token || !newPlain || newPlain.length < 8) {
       return { success: false, error: 'Password must be at least 8 characters.' };
     }
@@ -539,18 +621,23 @@ class AppStore {
     try {
       const res = await api<{ ok: boolean; message: string }>('/api/auth/reset', {
         method: 'POST',
-        body: JSON.stringify({ token: token.trim(), password: newPlain }),
+        body: JSON.stringify({
+          token: token.trim(),
+          password: newPlain,
+          ...(turnstileToken ? { turnstileToken } : {}),
+        }),
       });
       if (res && res.ok) {
         return { success: true };
       }
+      return { success: false, error: 'Password reset failed.' };
     } catch (err: any) {
-      if (err?.message) {
-        return { success: false, error: err.message };
+      if (err instanceof ApiError || err?.message) {
+        return { success: false, error: err.message || 'Password reset failed.' };
       }
     }
 
-    // In-memory fallback
+    // Offline-only fallback
     const record = this.resets.find((r) => r.token === token && !r.used);
     if (!record) {
       return { success: false, error: 'This reset token is invalid or has already been used.' };
@@ -576,24 +663,34 @@ class AppStore {
 
   // Server-Managed Persistent Session Verification
   public async checkSession(): Promise<PublicUser | null> {
-    try {
-      const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/me');
-      if (res && res.ok && res.user) {
-        this.sessionUser = res.user;
-        this.emit();
-        return res.user;
-      }
-    } catch {
-      // If server session is rejected/expired, clear frontend session
-      if (this.sessionUser) {
-        this.sessionUser = null;
-        try {
-          localStorage.removeItem(SESSION_KEY);
-        } catch {}
-        this.emit();
-      }
+    if (this.sessionCheckPromise) {
+      return this.sessionCheckPromise;
     }
-    return null;
+
+    this.sessionCheckPromise = (async () => {
+      try {
+        const res = await api<{ ok: boolean; user: PublicUser }>('/api/auth/me');
+        if (res && res.ok && res.user) {
+          this.setSessionUserInternal(res.user);
+          this.sessionChecked = true;
+          this.emit();
+          this.syncServerProjects().catch(() => {});
+          return res.user;
+        }
+      } catch (err: unknown) {
+        // Clear frontend session when server rejects with 401/403 (expired, revoked, or suspended)
+        if (err instanceof ApiError && (err.status === 401 || err.status === 403)) {
+          this.setSessionUserInternal(null);
+        }
+      } finally {
+        this.sessionChecked = true;
+        this.sessionCheckPromise = null;
+        this.emit();
+      }
+      return this.sessionUser;
+    })();
+
+    return this.sessionCheckPromise;
   }
 
   // Production Google OAuth Flow (verifies real ID token with backend)
@@ -607,22 +704,11 @@ class AppStore {
       });
 
       if (res && res.ok && res.user) {
-        this.sessionUser = res.user;
-        // Keep in-memory list synchronized
-        const existing = this.users.find((u) => u.id === res.user.id || u.email.toLowerCase() === res.user.email.toLowerCase());
-        if (!existing) {
-          this.users.unshift({
-            ...res.user,
-            passwordHash: '',
-            authProvider: 'google',
-          });
-          this.saveUsers();
-        } else {
-          Object.assign(existing, res.user);
-          this.saveUsers();
-        }
+        this.setSessionUserInternal(res.user);
+        this.sessionChecked = true;
         this.logAudit(res.user.email, 'auth.google_login', 'Authenticated via verified Google session');
         this.emit();
+        this.syncServerProjects().catch(() => {});
         return { success: true, user: res.user };
       }
       return { success: false, error: 'Google authentication failed.' };

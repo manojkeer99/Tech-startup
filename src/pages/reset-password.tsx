@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { TcMonogram, IconArrow, IconCheck } from '@/components/icons';
 import { Button, Field, Input } from '@/components/ui';
+import { TurnstileWidget, type TurnstileConfigState } from '@/components/turnstile-widget';
 import { useToast } from '@/components/toast';
 import { useI18n } from '@/lib/i18n';
 import { store } from '@/lib/store';
@@ -19,6 +20,14 @@ export function ResetPasswordPage({ tokenFromQuery = '', navigate }: ResetPasswo
   const [confirm, setConfirm] = useState('');
   const [busy, setBusy] = useState(false);
   const [success, setSuccess] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const [turnstileConfig, setTurnstileConfig] = useState<TurnstileConfigState>({
+    enabled: false,
+    required: false,
+    misconfigured: false,
+    mode: 'development-bypass',
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,17 +40,27 @@ export function ResetPasswordPage({ tokenFromQuery = '', navigate }: ResetPasswo
     if (password.length < 8) {
       return push('error', 'Password must be at least 8 characters long.');
     }
+    if (turnstileConfig.misconfigured) {
+      return push('error', 'Security verification is misconfigured on the server.');
+    }
+    if (turnstileConfig.required && !turnstileToken) {
+      return push('error', 'Please complete the Cloudflare Turnstile security check.');
+    }
 
     setBusy(true);
     try {
-      const res = await store.completePasswordReset(token.trim(), password);
+      const res = await store.completePasswordReset(token.trim(), password, turnstileToken);
       if (res.success) {
         setSuccess(true);
         push('success', 'Your password has been updated. You can now log in.');
       } else {
+        setTurnstileToken(null);
+        setTurnstileResetKey((k) => k + 1);
         push('error', res.error || 'Password reset failed.');
       }
     } catch {
+      setTurnstileToken(null);
+      setTurnstileResetKey((k) => k + 1);
       push('error', 'Failed to update password.');
     } finally {
       setBusy(false);
@@ -129,7 +148,20 @@ export function ResetPasswordPage({ tokenFromQuery = '', navigate }: ResetPasswo
               />
             </Field>
 
-            <Button type="submit" size="lg" loading={busy} className="w-full mt-2">
+            <TurnstileWidget
+              action="reset_password"
+              resetKey={turnstileResetKey}
+              onVerify={setTurnstileToken}
+              onConfigChange={setTurnstileConfig}
+            />
+
+            <Button
+              type="submit"
+              size="lg"
+              loading={busy}
+              disabled={busy || turnstileConfig.misconfigured || (turnstileConfig.required && !turnstileToken)}
+              className="w-full mt-2"
+            >
               <span>{t('updatePassword')}</span>
               {!busy && <IconArrow className="h-4 w-4" />}
             </Button>

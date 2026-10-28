@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { motion, useInView, useMotionValue, useSpring, useReducedMotion } from 'motion/react';
+import { motion, useInView, useReducedMotion } from 'motion/react';
 
 export function Reveal({
   children,
@@ -20,7 +20,7 @@ export function Reveal({
       className={className}
       initial={reduce ? { opacity: 0 } : { opacity: 0, y }}
       whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once, margin: '-40px' }}
+      viewport={{ once, margin: '0px' }}
       transition={{ duration: 0.6, delay, ease: [0.16, 1, 0.3, 1] }}
     >
       {children}
@@ -33,7 +33,7 @@ const GLYPHS = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789!#$';
 export function Scramble({ text, className, speed = 25 }: { text: string; className?: string; speed?: number }) {
   const reduce = useReducedMotion();
   const ref = useRef<HTMLSpanElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-40px' });
+  const inView = useInView(ref, { once: true, margin: '0px' });
   const [display, setDisplay] = useState(reduce ? text : '');
 
   useEffect(() => {
@@ -72,21 +72,39 @@ export function Scramble({ text, className, speed = 25 }: { text: string; classN
 export function CountUp({ to, suffix = '', duration = 1.4 }: { to: number; suffix?: string; duration?: number }) {
   const reduce = useReducedMotion();
   const ref = useRef<HTMLSpanElement>(null);
-  const inView = useInView(ref, { once: true, margin: '-40px' });
-  const mv = useMotionValue(0);
-  const spring = useSpring(mv, { duration: duration * 1000, bounce: 0 });
-  const [val, setVal] = useState(0);
+  const inView = useInView(ref, { once: true, margin: '0px' });
+  const target = Number.isFinite(to) ? to : 0;
+  const [val, setVal] = useState<number>(target);
 
   useEffect(() => {
-    if (!inView) return;
-    if (reduce) {
-      setVal(to);
+    setVal(target);
+
+    if (!inView || reduce || target <= 1) {
       return;
     }
-    const unsub = spring.on('change', (v) => setVal(Math.round(v)));
-    mv.set(to);
-    return () => unsub();
-  }, [inView, to, reduce, mv, spring]);
+
+    let rafId = 0;
+    const durationMs = Math.max(300, duration * 1000);
+    const startTime = performance.now();
+
+    const tick = (now: number) => {
+      const elapsed = now - startTime;
+      const progress = Math.min(1, elapsed / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const nextVal = Math.max(1, Math.round(1 + (target - 1) * eased));
+      setVal(progress >= 1 ? target : nextVal);
+
+      if (progress < 1) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      setVal(target);
+    };
+  }, [inView, target, reduce, duration]);
 
   return (
     <span ref={ref}>

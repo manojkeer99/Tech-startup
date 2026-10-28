@@ -16,19 +16,30 @@ const ThemeContext = createContext<ThemeContextType>({
 });
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
-  const [theme, setThemeState] = useState<ThemeMode>('system');
-  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('dark');
-
-  useEffect(() => {
+  const [theme, setThemeState] = useState<ThemeMode>(() => {
+    if (typeof window === 'undefined') return 'system';
     try {
       const stored = localStorage.getItem('tc_theme') as ThemeMode;
       if (stored === 'light' || stored === 'dark' || stored === 'system') {
-        setThemeState(stored);
+        return stored;
       }
     } catch {
       // Ignore
     }
-  }, []);
+    return 'system';
+  });
+
+  const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>(() => {
+    if (typeof window === 'undefined') return 'dark';
+    try {
+      const stored = localStorage.getItem('tc_theme') as ThemeMode;
+      if (stored === 'light' || stored === 'dark') return stored;
+      const prefersDark = window.matchMedia?.('(prefers-color-scheme: dark)').matches ?? true;
+      return prefersDark ? 'dark' : 'light';
+    } catch {
+      return 'dark';
+    }
+  });
 
   useEffect(() => {
     const root = document.documentElement;

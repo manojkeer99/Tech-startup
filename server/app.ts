@@ -9,6 +9,7 @@ import { OAuth2Client } from 'google-auth-library';
 import { checkDbConnection, isDbConfigured, query, pool } from './db.js';
 
 export const app = express();
+app.set('trust proxy', 1);
 
 // Security & Parsing Middlewares
 app.use(express.json({ limit: '10mb' }));
@@ -89,6 +90,11 @@ app.use(checkCsrf);
 const SESSION_COOKIE = 'tc_session';
 const SESSION_DURATION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
+// Referral Attribution Cookie Name & Lifetime (30 days)
+const REFERRAL_COOKIE = 'tc_ref';
+const REFERRAL_COOKIE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
+const COMMISSION_RATE = 0.10; // Fixed 10% referral commission rate
+
 // Trusted administrator emails provisioned exclusively via server-side configuration
 // Rule: Public registration and Google Sign-In can NEVER grant admin privileges to an unverified email.
 export const TRUSTED_ADMIN_EMAILS: string[] = [
@@ -108,6 +114,7 @@ export interface ServerUser {
   suspended: boolean;
   googleId?: string | null;
   avatarUrl?: string | null;
+  referralCode?: string | null;
   createdAt: string;
   passwordHash: string;
 }
@@ -132,6 +139,8 @@ export interface ServerProject {
   status: string;
   progress: number;
   tokenCharged: number;
+  referredByUserId?: string | null;
+  referralCodeUsed?: string | null;
   createdAt: string;
   updatedAt: string;
   updates: Array<{ id: string; authorName: string; authorRole: string; message: string; createdAt: string }>;
@@ -150,6 +159,7 @@ const MEMORY_USERS: ServerUser[] = [
     suspended: false,
     googleId: null,
     avatarUrl: null,
+    referralCode: 'TCR-ADMIN001',
     createdAt: new Date(Date.now() - 90 * 86400000).toISOString(),
     passwordHash: '$2b$10$FHDR5npUPT2UVLG5G.b7V.Hh3bRIxVk/hveSHMNpNYE6a6GQjYnn2',
   },
@@ -164,6 +174,7 @@ const MEMORY_USERS: ServerUser[] = [
     suspended: false,
     googleId: null,
     avatarUrl: null,
+    referralCode: 'TCR-ARJUN001',
     createdAt: new Date(Date.now() - 30 * 86400000).toISOString(),
     passwordHash: '$2b$10$7d3NSvQM6yMmTFvhBXchyeTtK5WbLbjHqc8dEyRXqe7ETi7kVk40O',
   },
@@ -251,31 +262,203 @@ function logAudit(actor: string, action: string, detail: string | null = null) {
   }
 }
 
-function setSessionCookie(res: Response, rawToken: string, req?: Request) {
+function isHttpsRequest(req?: Request): boolean {
   const isProd = process.env.NODE_ENV === 'production';
-  const origin = (req?.headers.origin as string) || '';
-  const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
+  const origin = (req?.headers.origin as string) || (req?.headers.referer as string) || '';
+  const forwardedProto = String(req?.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return isProd || Boolean(req?.secure) || forwardedProto === 'https' || origin.startsWith('https://');
+}
+
+function setSessionCookie(res: Response, rawToken: string, req?: Request) {
+  const useSecureNone = isHttpsRequest(req);
 
   res.cookie(SESSION_COOKIE, rawToken, {
     httpOnly: true,
-    sameSite: isCrossSite ? 'none' : 'lax',
-    secure: isProd || isCrossSite,
+    sameSite: useSecureNone ? 'none' : 'lax',
+    secure: useSecureNone,
     path: '/',
     maxAge: SESSION_DURATION_MS,
   });
 }
 
 function clearSessionCookie(res: Response, req?: Request) {
-  const isProd = process.env.NODE_ENV === 'production';
-  const origin = (req?.headers.origin as string) || '';
-  const isCrossSite = isProd && origin.length > 0 && !origin.includes('onrender.com') && !origin.includes('localhost');
+  const useSecureNone = isHttpsRequest(req);
 
   res.clearCookie(SESSION_COOKIE, {
     httpOnly: true,
-    sameSite: isCrossSite ? 'none' : 'lax',
-    secure: isProd || isCrossSite,
+    sameSite: useSecureNone ? 'none' : 'lax',
+    secure: useSecureNone,
     path: '/',
   });
+}
+
+// Referral Code & Tamper-Resistant Attribution Helpers
+function generateReferralCode(seed?: string): string {
+  if (seed) {
+    const hash = crypto.createHash('md5').update(seed).digest('hex').toUpperCase();
+    return `TCR-${hash.slice(0, 8)}`;
+  }
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let rand = '';
+  const bytes = crypto.randomBytes(8);
+  for (let i = 0; i < 8; i++) {
+    rand += chars[bytes[i] % chars.length];
+  }
+  return `TCR-${rand}`;
+}
+
+async function ensureUserReferralCode(user: ServerUser): Promise<string> {
+  if (user.referralCode) {
+    return user.referralCode;
+  }
+
+  const candidate = generateReferralCode(`${user.id}:${user.email}`);
+  if (isDbConfigured) {
+    try {
+      const existing = await query<{ referral_code: string | null }>(
+        'SELECT referral_code FROM users WHERE id = $1 LIMIT 1',
+        [user.id]
+      );
+      if (existing.rows[0]?.referral_code) {
+        user.referralCode = existing.rows[0].referral_code;
+        return user.referralCode;
+      }
+
+      const upd = await query<{ referral_code: string }>(
+        `UPDATE users
+         SET referral_code = COALESCE(referral_code, $1)
+         WHERE id = $2
+         RETURNING referral_code`,
+        [candidate, user.id]
+      );
+      if (upd.rows[0]?.referral_code) {
+        user.referralCode = upd.rows[0].referral_code;
+        return user.referralCode;
+      }
+    } catch {
+      // Fallback to random code on collision
+      const fallbackCode = generateReferralCode();
+      try {
+        await query('UPDATE users SET referral_code = $1 WHERE id = $2 AND referral_code IS NULL', [fallbackCode, user.id]);
+        user.referralCode = fallbackCode;
+        return fallbackCode;
+      } catch {
+        // Ignore
+      }
+    }
+  }
+
+  user.referralCode = candidate;
+  return candidate;
+}
+
+const FALLBACK_PROCESS_HMAC_SECRET = crypto.randomBytes(32).toString('hex');
+if (
+  process.env.NODE_ENV === 'production' &&
+  !process.env.SESSION_SECRET &&
+  !process.env.JWT_SECRET
+) {
+  console.warn(
+    '[Security Notice] SESSION_SECRET is not explicitly set; deriving referral HMAC signing key from environment configuration.'
+  );
+}
+
+const SUPPORTED_PAYMENT_CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'AED', 'AUD', 'CAD', 'SGD'] as const;
+
+function normalizePaymentCurrency(raw: unknown, fallback = 'INR'): string {
+  const code = String(raw || '').trim().toUpperCase();
+  if ((SUPPORTED_PAYMENT_CURRENCIES as readonly string[]).includes(code)) {
+    return code;
+  }
+  return fallback;
+}
+
+function formatMoneyWithCurrency(amount: number, currency: string): string {
+  const cleanCurrency = normalizePaymentCurrency(currency, 'INR');
+  const num = Number.isFinite(amount) ? amount : 0;
+  return `${cleanCurrency} ${num.toFixed(2)}`;
+}
+
+function getReferralHmacKey(): Buffer {
+  const secretSource =
+    process.env.SESSION_SECRET ||
+    process.env.JWT_SECRET ||
+    process.env.DATABASE_URL ||
+    FALLBACK_PROCESS_HMAC_SECRET;
+  return crypto.createHash('sha256').update(`tcr_ref_v1:${secretSource}`).digest();
+}
+
+interface SignedReferralPayload {
+  code: string;
+  referrerId: string;
+  iat: number;
+  exp: number;
+}
+
+function signReferralPayload(payload: SignedReferralPayload): string {
+  const dataB64 = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const sig = crypto.createHmac('sha256', getReferralHmacKey()).update(dataB64).digest('base64url');
+  return `${dataB64}.${sig}`;
+}
+
+function verifyReferralCookie(rawCookie: string | undefined): SignedReferralPayload | null {
+  if (!rawCookie || typeof rawCookie !== 'string' || !rawCookie.includes('.')) {
+    return null;
+  }
+  const parts = rawCookie.split('.');
+  if (parts.length !== 2) return null;
+  const [dataB64, sig] = parts;
+
+  try {
+    const expectedSig = crypto.createHmac('sha256', getReferralHmacKey()).update(dataB64).digest('base64url');
+    const sigBuf = Buffer.from(sig, 'utf-8');
+    const expBuf = Buffer.from(expectedSig, 'utf-8');
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return null;
+    }
+
+    const parsed = JSON.parse(Buffer.from(dataB64, 'base64url').toString('utf-8')) as SignedReferralPayload;
+    if (!parsed || typeof parsed.code !== 'string' || typeof parsed.referrerId !== 'string') {
+      return null;
+    }
+    if (typeof parsed.exp !== 'number' || parsed.exp < Date.now()) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function setReferralCookie(res: Response, token: string, req?: Request) {
+  const useSecureNone = isHttpsRequest(req);
+
+  res.cookie(REFERRAL_COOKIE, token, {
+    httpOnly: true,
+    sameSite: useSecureNone ? 'none' : 'lax',
+    secure: useSecureNone,
+    path: '/',
+    maxAge: REFERRAL_COOKIE_DURATION_MS,
+  });
+}
+
+function clearReferralCookie(res: Response, req?: Request) {
+  const useSecureNone = isHttpsRequest(req);
+
+  res.clearCookie(REFERRAL_COOKIE, {
+    httpOnly: true,
+    sameSite: useSecureNone ? 'none' : 'lax',
+    secure: useSecureNone,
+    path: '/',
+  });
+}
+
+function maskEmail(email: string): string {
+  const clean = String(email || '').trim();
+  const [local, domain] = clean.split('@');
+  if (!local || !domain) return '***';
+  const visible = local.slice(0, Math.min(2, local.length));
+  return `${visible}***@${domain}`;
 }
 
 /**
@@ -345,6 +528,7 @@ async function resolveAuthUser(req: Request): Promise<ServerUser | null> {
         suspended: boolean;
         google_id: string | null;
         avatar_url: string | null;
+        referral_code: string | null;
         created_at: string;
         password_hash: string;
       }>(
@@ -362,6 +546,7 @@ async function resolveAuthUser(req: Request): Promise<ServerUser | null> {
            u.suspended,
            u.google_id,
            u.avatar_url,
+           u.referral_code,
            u.created_at,
            u.password_hash
          FROM user_sessions s
@@ -391,6 +576,7 @@ async function resolveAuthUser(req: Request): Promise<ServerUser | null> {
           suspended: Boolean(row.suspended),
           googleId: row.google_id,
           avatarUrl: row.avatar_url,
+          referralCode: row.referral_code,
           createdAt: new Date(row.created_at).toISOString(),
           passwordHash: row.password_hash,
         };
@@ -501,71 +687,340 @@ app.get('/api/services', (_req: Request, res: Response) => {
 /*                               CONTACT FORM                                 */
 /* -------------------------------------------------------------------------- */
 
-app.post('/api/contact', async (req: Request, res: Response) => {
+app.post('/api/contact', (req: Request, res: Response) => {
   const { name, email, subject, message, companyWebsite } = req.body || {};
 
-  // Honeypot: return a generic success response without storing bot submissions.
-  if (typeof companyWebsite === 'string' && companyWebsite.trim()) {
+  // Honeypot check
+  if (companyWebsite) {
     return res.json({ ok: true, message: 'Message received.' });
   }
 
-  const cleanName = typeof name === 'string' ? name.trim() : '';
-  const cleanEmail = typeof email === 'string' ? email.trim().toLowerCase() : '';
-  const cleanSubject = typeof subject === 'string' ? subject.trim() : '';
-  const cleanMessage = typeof message === 'string' ? message.trim() : '';
-  const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-  if (cleanName.length < 2 || cleanName.length > 120) {
-    return res.status(400).json({ error: 'Please enter a name between 2 and 120 characters.' });
+  if (!name || typeof name !== 'string' || name.trim().length < 2) {
+    return res.status(400).json({ error: 'Please enter your name.' });
   }
-  if (cleanEmail.length > 255 || !emailPattern.test(cleanEmail)) {
+  if (!email || typeof email !== 'string' || !email.includes('@')) {
     return res.status(400).json({ error: 'Please enter a valid email address.' });
   }
-  if (cleanSubject.length < 3 || cleanSubject.length > 255) {
-    return res.status(400).json({ error: 'Please enter a subject between 3 and 255 characters.' });
+  if (!subject || typeof subject !== 'string' || subject.trim().length < 3) {
+    return res.status(400).json({ error: 'Please enter a subject.' });
   }
-  if (cleanMessage.length < 15 || cleanMessage.length > 10000) {
-    return res.status(400).json({ error: 'Please enter a message between 15 and 10000 characters.' });
-  }
-
-  // A contact submission is successful only after durable database storage succeeds.
-  if (!isDbConfigured) {
-    return res.status(503).json({ error: 'Contact submissions are temporarily unavailable. Please email us directly.' });
+  if (!message || typeof message !== 'string' || message.trim().length < 15) {
+    return res.status(400).json({ error: 'Please enter a message of at least 15 characters.' });
   }
 
-  const id = `inq_${Date.now()}_${crypto.randomBytes(6).toString('hex')}`;
-  try {
-    await query(
-      'INSERT INTO contact_inquiries (id, name, email, subject, message) VALUES ($1, $2, $3, $4, $5)',
-      [id, cleanName, cleanEmail, cleanSubject, cleanMessage]
-    );
-    logAudit(cleanEmail, 'contact.inquiry', `Subject: ${cleanSubject}`);
-    return res.status(201).json({
-      ok: true,
-      message: 'Your inquiry has been recorded. Our team will review it and respond using the email you provided.',
-      inquiryId: id,
-    });
-  } catch (err) {
-    console.error('[Contact Inquiry Save Error]:', err instanceof Error ? err.message : 'Unknown database error');
-    return res.status(500).json({ error: 'We could not save your inquiry right now. Please try again or email us directly.' });
-  }
+  logAudit(email.trim().toLowerCase(), 'contact.inquiry', `Subject: ${subject.trim()}`);
+
+  return res.json({
+    ok: true,
+    message: 'Your inquiry has been received. Our team will get back to you within 24 hours.',
+    fallbackEmail: 'thecreators.pvt.ltd@gmail.com',
+  });
 });
 
 /* -------------------------------------------------------------------------- */
 /*                               AUTHENTICATION                               */
 /* -------------------------------------------------------------------------- */
 
+const TURNSTILE_SITEVERIFY_URL = 'https://challenges.cloudflare.com/turnstile/v0/siteverify';
+const TURNSTILE_TOKEN_TTL_MS = 10 * 60 * 1000; // 10 minutes replay cache
+const USED_TURNSTILE_TOKENS = new Map<string, number>();
+let turnstileUnconfiguredWarned = false;
+
+function sanitizeEnvKey(raw?: string): string | null {
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/^['"]+|['"]+$/g, '').trim();
+  return cleaned || null;
+}
+
+function getTurnstileSiteKey(): string | null {
+  return (
+    sanitizeEnvKey(process.env.TURNSTILE_SITE_KEY) ||
+    sanitizeEnvKey(process.env.VITE_TURNSTILE_SITE_KEY) ||
+    null
+  );
+}
+
+function getTurnstileSecretKey(): string | null {
+  return sanitizeEnvKey(process.env.TURNSTILE_SECRET_KEY);
+}
+
+function sanitizeRemoteIp(rawIp: string): string | null {
+  if (!rawIp) return null;
+  const trimmed = rawIp.trim().replace(/^::ffff:/i, '');
+  if (
+    !trimmed ||
+    trimmed === '127.0.0.1' ||
+    trimmed === '::1' ||
+    trimmed === 'localhost' ||
+    trimmed.includes(' ')
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+function cleanupUsedTurnstileTokens() {
+  const now = Date.now();
+  for (const [hash, expiresAt] of USED_TURNSTILE_TOKENS.entries()) {
+    if (expiresAt <= now) {
+      USED_TURNSTILE_TOKENS.delete(hash);
+    }
+  }
+}
+
+/**
+ * Verifies a Cloudflare Turnstile token against Cloudflare's official Siteverify API.
+ * Enforces single-use token consumption, timeouts, and safe failure handling.
+ * Never logs raw tokens, secrets, or passwords.
+ */
+async function verifyTurnstileToken(req: Request, res: Response, actionName: string): Promise<boolean> {
+  const siteKey = getTurnstileSiteKey();
+  const secretKey = getTurnstileSecretKey();
+  const isProd = process.env.NODE_ENV === 'production';
+
+  const rawToken =
+    typeof req.body?.turnstileToken === 'string'
+      ? req.body.turnstileToken.trim()
+      : typeof req.body?.['cf-turnstile-response'] === 'string'
+      ? req.body['cf-turnstile-response'].trim()
+      : '';
+
+  // 1. Check for partial/broken configuration:
+  // - If siteKey is set without secretKey, server cannot verify tokens
+  // - If secretKey is set without siteKey on the server AND client sent no token, configuration is incomplete
+  if ((siteKey && !secretKey) || (!siteKey && secretKey && !rawToken)) {
+    logAudit('System', 'security.turnstile_misconfigured', `Action: ${actionName}`);
+    res.status(503).json({
+      error: 'Security verification is misconfigured on the server. Both TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY must be configured.',
+      code: 'TURNSTILE_MISCONFIGURED',
+    });
+    return false;
+  }
+
+  // 2. Handle unconfigured state when neither key is present
+  if (!siteKey && !secretKey) {
+    // If a client submitted a token anyway, fail safely because the server cannot verify it without a secret
+    if (rawToken) {
+      res.status(503).json({
+        error: 'Security verification secret key is not configured on the server.',
+        code: 'TURNSTILE_UNCONFIGURED',
+      });
+      return false;
+    }
+
+    // Never bypass Turnstile verification in production
+    if (isProd || process.env.TURNSTILE_STRICT === 'true') {
+      logAudit('System', 'security.turnstile_unconfigured_production', `Action: ${actionName}`);
+      res.status(503).json({
+        error: 'Cloudflare Turnstile is not configured on the server.',
+        code: 'TURNSTILE_UNCONFIGURED',
+      });
+      return false;
+    }
+
+    if (!turnstileUnconfiguredWarned) {
+      turnstileUnconfiguredWarned = true;
+      console.warn(
+        '[Turnstile] Development mode: TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY are not set. Set both environment variables to enable Cloudflare Turnstile verification.'
+      );
+    }
+    return true;
+  }
+
+  // 3. Turnstile is configured: token is strictly mandatory
+  if (!rawToken) {
+    res.status(400).json({
+      error: 'Security verification is required. Please complete the Cloudflare Turnstile check.',
+      code: 'TURNSTILE_TOKEN_MISSING',
+    });
+    return false;
+  }
+
+  if (rawToken.length > 2048) {
+    res.status(400).json({
+      error: 'Invalid security verification token.',
+      code: 'TURNSTILE_TOKEN_INVALID',
+    });
+    return false;
+  }
+
+  // 4. Prevent token replay (tokens are strictly single-use)
+  cleanupUsedTurnstileTokens();
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  if (USED_TURNSTILE_TOKENS.has(tokenHash)) {
+    logAudit('System', 'security.turnstile_replay_blocked', `Action: ${actionName}`);
+    res.status(400).json({
+      error: 'Security verification token has already been used. Please complete the challenge again.',
+      code: 'TURNSTILE_TOKEN_REUSED',
+    });
+    return false;
+  }
+
+  // 5. Verify with Cloudflare official Siteverify API with strict timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const cfConnectingIp = String(req.headers['cf-connecting-ip'] || '').trim();
+    const forwardedFor = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    const remoteIp = sanitizeRemoteIp(cfConnectingIp || forwardedFor || req.socket?.remoteAddress || '');
+
+    const formData = new URLSearchParams();
+    formData.append('secret', secretKey!);
+    formData.append('response', rawToken);
+    if (remoteIp) {
+      formData.append('remoteip', remoteIp);
+    }
+
+    const verifyUrl = process.env.TURNSTILE_VERIFY_URL?.trim() || TURNSTILE_SITEVERIFY_URL;
+    const cfRes = await fetch(verifyUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Accept: 'application/json',
+      },
+      body: formData.toString(),
+      signal: controller.signal,
+    });
+
+    if (!cfRes.ok) {
+      logAudit('System', 'security.turnstile_upstream_error', `Status: ${cfRes.status}, Action: ${actionName}`);
+      res.status(503).json({
+        error: 'Security verification service is temporarily unavailable. Please try again in a moment.',
+        code: 'TURNSTILE_SERVICE_ERROR',
+      });
+      return false;
+    }
+
+    const data = (await cfRes.json()) as {
+      success?: boolean;
+      'error-codes'?: string[];
+      action?: string;
+      hostname?: string;
+    };
+
+    if (!data || data.success !== true) {
+      const errorCodes = Array.isArray(data?.['error-codes'])
+        ? data['error-codes'].map((c) => String(c).replace(/[^a-zA-Z0-9_-]/g, ''))
+        : [];
+      const codeSummary = errorCodes.join(', ') || 'unknown';
+      logAudit(
+        'System',
+        'security.turnstile_rejected',
+        `Action: ${actionName}, Codes: ${codeSummary}`
+      );
+
+      if (errorCodes.includes('timeout-or-duplicate')) {
+        res.status(400).json({
+          error: 'Security verification token has expired or was already used. Please retry the challenge.',
+          code: 'TURNSTILE_TOKEN_EXPIRED',
+          turnstileErrorCodes: errorCodes,
+        });
+        return false;
+      }
+
+      if (errorCodes.includes('invalid-input-secret') || errorCodes.includes('missing-input-secret')) {
+        res.status(503).json({
+          error: `Security verification is misconfigured on the server (${codeSummary}). Verify TURNSTILE_SECRET_KEY matches the active widget.`,
+          code: 'TURNSTILE_SERVER_CONFIG_ERROR',
+          turnstileErrorCodes: errorCodes,
+        });
+        return false;
+      }
+
+      res.status(400).json({
+        error: `Security verification failed (${codeSummary}). Please complete the challenge and try again.`,
+        code: 'TURNSTILE_VERIFICATION_FAILED',
+        turnstileErrorCodes: errorCodes,
+      });
+      return false;
+    }
+
+    // Optional action match check if Cloudflare returned an action name
+    if (data.action && data.action !== actionName && data.action !== 'auth') {
+      logAudit('System', 'security.turnstile_action_mismatch', `Expected: ${actionName}, Got: ${data.action}`);
+      res.status(400).json({
+        error: 'Security verification action mismatch. Please retry.',
+        code: 'TURNSTILE_ACTION_MISMATCH',
+      });
+      return false;
+    }
+
+    // Mark token hash as consumed
+    USED_TURNSTILE_TOKENS.set(tokenHash, Date.now() + TURNSTILE_TOKEN_TTL_MS);
+    return true;
+  } catch (err: unknown) {
+    const isAbort = err instanceof Error && err.name === 'AbortError';
+    logAudit(
+      'System',
+      'security.turnstile_service_failure',
+      `Action: ${actionName}, Reason: ${isAbort ? 'timeout' : 'network_error'}`
+    );
+    res.status(503).json({
+      error: isAbort
+        ? 'Security verification timed out. Please try again.'
+        : 'Unable to reach security verification service. Please try again shortly.',
+      code: isAbort ? 'TURNSTILE_TIMEOUT' : 'TURNSTILE_SERVICE_ERROR',
+    });
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+/**
+ * Safe Client Turnstile Error Code Diagnostic Endpoint.
+ * Records non-sensitive Cloudflare Turnstile widget error codes (e.g. 110200 hostname mismatch,
+ * 110100 invalid sitekey, 300030 execution error) and hostname without logging tokens or secrets.
+ */
+app.post('/api/auth/turnstile-diagnostic', (req: Request, res: Response) => {
+  const rawCode = typeof req.body?.errorCode === 'string' ? req.body.errorCode : '';
+  const rawAction = typeof req.body?.action === 'string' ? req.body.action : 'auth';
+  const rawHostname = typeof req.body?.hostname === 'string' ? req.body.hostname : '';
+
+  const safeCode = rawCode.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 32) || 'unknown';
+  const safeAction = rawAction.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 32) || 'auth';
+  const safeHostname = rawHostname.replace(/[^a-zA-Z0-9.:_-]/g, '').slice(0, 128) || 'unknown';
+
+  logAudit(
+    'System',
+    'security.turnstile_client_error',
+    `Code: ${safeCode}, Hostname: ${safeHostname}, Action: ${safeAction}`
+  );
+
+  return res.json({ ok: true, recordedCode: safeCode });
+});
+
 /**
  * Public Auth Configuration Endpoint.
- * Informs the frontend whether Google OAuth is configured and returns the public Client ID.
- * Never exposes secrets.
+ * Informs the frontend whether Google OAuth and Cloudflare Turnstile are configured
+ * and returns only public keys (never secrets).
  */
 app.get('/api/auth/config', (_req: Request, res: Response) => {
   const clientId = process.env.GOOGLE_CLIENT_ID?.trim() || process.env.VITE_GOOGLE_CLIENT_ID?.trim() || null;
+  const turnstileSiteKey = getTurnstileSiteKey();
+  const turnstileSecretKey = getTurnstileSecretKey();
+  const isProd = process.env.NODE_ENV === 'production';
+  const turnstileEnabled = Boolean(turnstileSiteKey && turnstileSecretKey);
+  const turnstileMisconfigured = Boolean(
+    (turnstileSiteKey && !turnstileSecretKey) || (!turnstileSiteKey && turnstileSecretKey)
+  );
+
   return res.json({
     ok: true,
     googleClientId: clientId,
     isConfigured: Boolean(clientId),
+    turnstileSiteKey: turnstileEnabled ? turnstileSiteKey : null,
+    turnstileEnabled,
+    turnstileRequired:
+      turnstileEnabled || turnstileMisconfigured || isProd || process.env.TURNSTILE_STRICT === 'true',
+    turnstileMode: turnstileEnabled
+      ? 'enforced'
+      : turnstileMisconfigured
+      ? 'misconfigured'
+      : isProd || process.env.TURNSTILE_STRICT === 'true'
+      ? 'unconfigured-production'
+      : 'development-bypass',
   });
 });
 
@@ -756,11 +1211,12 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
           const newUserId = `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
           const unusablePasswordHash = `*GOOGLE_AUTH_LOCKED*${crypto.randomBytes(32).toString('hex')}`;
           const defaultTokens = 0;
+          const referralCode = generateReferralCode(`${newUserId}:${cleanEmail}`);
 
           await query(
-            `INSERT INTO users (id, name, email, google_id, avatar_url, role, token_balance, suspended, password_hash)
-             VALUES ($1, $2, $3, $4, $5, 'client', $6, false, $7)`,
-            [newUserId, googleName, cleanEmail, googleId, avatarUrl, defaultTokens, unusablePasswordHash]
+            `INSERT INTO users (id, name, email, google_id, avatar_url, role, token_balance, suspended, password_hash, referral_code)
+             VALUES ($1, $2, $3, $4, $5, 'client', $6, false, $7, $8)`,
+            [newUserId, googleName, cleanEmail, googleId, avatarUrl, defaultTokens, unusablePasswordHash, referralCode]
           );
 
           // Welcome notification
@@ -780,6 +1236,7 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
             suspended: false,
             googleId,
             avatarUrl,
+            referralCode,
             createdAt: new Date().toISOString(),
             passwordHash: unusablePasswordHash,
           };
@@ -833,6 +1290,10 @@ app.post('/api/auth/google', async (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/register', async (req: Request, res: Response) => {
+  if (!(await verifyTurnstileToken(req, res, 'register'))) {
+    return;
+  }
+
   const { name, email, password, phone, age } = req.body || {};
 
   if (!name || typeof name !== 'string' || name.trim().length < 2) {
@@ -858,11 +1319,12 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
       const id = `usr_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
       const pwHash = hashPassword(password);
       const defaultTokens = 0;
+      const referralCode = generateReferralCode(`${id}:${cleanEmail}`);
 
       await query(
-        `INSERT INTO users (id, name, email, phone, age, role, token_balance, suspended, password_hash)
-         VALUES ($1, $2, $3, $4, $5, 'client', $6, false, $7)`,
-        [id, name.trim(), cleanEmail, phone ? String(phone).trim() : null, age ? Number(age) : null, defaultTokens, pwHash]
+        `INSERT INTO users (id, name, email, phone, age, role, token_balance, suspended, password_hash, referral_code)
+         VALUES ($1, $2, $3, $4, $5, 'client', $6, false, $7, $8)`,
+        [id, name.trim(), cleanEmail, phone ? String(phone).trim() : null, age ? Number(age) : null, defaultTokens, pwHash, referralCode]
       );
 
       newUser = {
@@ -876,6 +1338,7 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
         suspended: false,
         googleId: null,
         avatarUrl: null,
+        referralCode,
         createdAt: new Date().toISOString(),
         passwordHash: pwHash,
       };
@@ -919,6 +1382,10 @@ app.post('/api/auth/register', async (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/login', async (req: Request, res: Response) => {
+  if (!(await verifyTurnstileToken(req, res, 'login'))) {
+    return;
+  }
+
   const { email, password } = req.body || {};
   const cleanEmail = String(email || '').trim().toLowerCase();
 
@@ -999,6 +1466,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   }
 
   // Create persistent session
+  await ensureUserReferralCode(user);
   await createUserSession(user, req, res);
   logAudit(cleanEmail, 'auth.login_success', `Role: ${user.role}`);
 
@@ -1016,11 +1484,15 @@ app.post('/api/auth/logout', async (req: Request, res: Response) => {
 
   if (rawToken) {
     const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
-    if (isDbConfigured) {
-      query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [tokenHash]).catch(() => {});
-    }
     const mem = MEMORY_SESSIONS.get(tokenHash);
     if (mem) mem.revoked = true;
+    if (isDbConfigured) {
+      try {
+        await query('UPDATE user_sessions SET revoked = true WHERE token_hash = $1', [tokenHash]);
+      } catch {
+        // Ignore DB revocation error on logout
+      }
+    }
   }
 
   clearSessionCookie(res, req);
@@ -1032,12 +1504,17 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
   if (!user) {
     return res.status(401).json({ error: 'Not authenticated.' });
   }
+  await ensureUserReferralCode(user);
   const { passwordHash: _, ...publicUser } = user;
   return res.json({ ok: true, user: publicUser });
 });
 
 // Password recovery endpoints (single-use token hash stored in PostgreSQL password_resets table)
 app.post('/api/auth/forgot', async (req: Request, res: Response) => {
+  if (!(await verifyTurnstileToken(req, res, 'forgot_password'))) {
+    return;
+  }
+
   const { email } = req.body || {};
   const cleanEmail = String(email || '').trim().toLowerCase();
 
@@ -1074,6 +1551,10 @@ app.post('/api/auth/forgot', async (req: Request, res: Response) => {
 });
 
 app.post('/api/auth/reset', async (req: Request, res: Response) => {
+  if (!(await verifyTurnstileToken(req, res, 'reset_password'))) {
+    return;
+  }
+
   const { token, password } = req.body || {};
   if (!token || typeof token !== 'string' || !password || typeof password !== 'string' || password.length < 8) {
     return res.status(400).json({ error: 'Valid token and a new password of at least 8 characters are required.' });
@@ -1299,17 +1780,106 @@ app.post('/api/projects', async (req: Request, res: Response) => {
     ],
   };
 
+  const signedReferral = verifyReferralCookie(req.cookies[REFERRAL_COOKIE]);
+  let attributedReferrer: { id: string; email: string; code: string } | null = null;
+
   if (isDbConfigured && pool) {
     let client;
     try {
       client = await pool.connect();
       await client.query('BEGIN');
+
+      // Server-side referral attribution check (tamper-resistant, no self-referral, no claiming existing clients, serialized against concurrent duplicate submissions)
+      if (signedReferral) {
+        // Acquire transaction-scoped advisory locks on normalized client identity to prevent concurrent race attribution
+        const lockKeys = new Set<string>([`ref_client_email:${clientEmail.toLowerCase()}`]);
+        if (newProject.clientId) {
+          lockKeys.add(`ref_client_id:${newProject.clientId}`);
+        }
+        if (user?.email) {
+          lockKeys.add(`ref_user_email:${user.email.toLowerCase()}`);
+        }
+        for (const lockKey of Array.from(lockKeys).sort()) {
+          await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [lockKey]);
+        }
+
+        const refUserRes = await client.query<{
+          id: string;
+          email: string;
+          referral_code: string;
+          suspended: boolean;
+        }>(
+          'SELECT id, email, referral_code, suspended FROM users WHERE id = $1 AND UPPER(referral_code) = $2 LIMIT 1',
+          [signedReferral.referrerId, signedReferral.code.toUpperCase()]
+        );
+
+        if (refUserRes.rows.length > 0) {
+          const referrer = refUserRes.rows[0];
+          const isSelfById = Boolean(newProject.clientId && referrer.id === newProject.clientId);
+          const isSelfByEmail =
+            referrer.email.toLowerCase() === clientEmail.toLowerCase() ||
+            (user?.email ? referrer.email.toLowerCase() === user.email.toLowerCase() : false);
+
+          if (!referrer.suspended && !isSelfById && !isSelfByEmail) {
+            const authUserEmail = user?.email ? user.email.toLowerCase() : null;
+
+            // Check whether this client (by user ID, submitted email, or session email) already has prior projects or prior referral attribution
+            const priorProjectsRes = await client.query<{ cnt: string }>(
+              `SELECT COUNT(*) AS cnt FROM projects
+               WHERE (client_id = $1 AND $1 IS NOT NULL)
+                  OR LOWER(client_email) = LOWER($2)
+                  OR ($3::text IS NOT NULL AND LOWER(client_email) = LOWER($3))`,
+              [newProject.clientId, clientEmail, authUserEmail]
+            );
+            const priorProjectsCount = parseInt(priorProjectsRes.rows[0]?.cnt || '0', 10);
+
+            const priorReferralsRes = await client.query<{ cnt: string }>(
+              `SELECT COUNT(*) AS cnt FROM referrals
+               WHERE (client_user_id = $1 AND $1 IS NOT NULL)
+                  OR LOWER(client_email) = LOWER($2)
+                  OR ($3::text IS NOT NULL AND LOWER(client_email) = LOWER($3))`,
+              [newProject.clientId, clientEmail, authUserEmail]
+            );
+            const priorReferralsCount = parseInt(priorReferralsRes.rows[0]?.cnt || '0', 10);
+
+            // Check if a registered user account existed before the referral link was visited (with 5-min clock buffer)
+            let isPreExistingUserAccount = false;
+            if (user?.createdAt) {
+              const userCreatedMs = new Date(user.createdAt).getTime();
+              if (userCreatedMs < signedReferral.iat - 5 * 60 * 1000) {
+                isPreExistingUserAccount = true;
+              }
+            }
+            const existingAccountByEmail = await client.query<{ created_at: string }>(
+              'SELECT created_at FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+              [clientEmail]
+            );
+            if (existingAccountByEmail.rows.length > 0) {
+              const acctCreatedMs = new Date(existingAccountByEmail.rows[0].created_at).getTime();
+              if (acctCreatedMs < signedReferral.iat - 5 * 60 * 1000) {
+                isPreExistingUserAccount = true;
+              }
+            }
+
+            if (priorProjectsCount === 0 && priorReferralsCount === 0 && !isPreExistingUserAccount) {
+              attributedReferrer = {
+                id: referrer.id,
+                email: referrer.email,
+                code: referrer.referral_code,
+              };
+              newProject.referredByUserId = referrer.id;
+              newProject.referralCodeUsed = referrer.referral_code;
+            }
+          }
+        }
+      }
+
       await client.query(
         `INSERT INTO projects (
            id, project_id, client_id, client_name, client_email, client_phone, age,
            service, title, description, requirements, budget, deadline, references_text,
-           attachments, extra, status, progress, token_charged
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19)`,
+           attachments, extra, status, progress, token_charged, referred_by_user_id, referral_code_used
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21)`,
         [
           id,
           projectId,
@@ -1330,6 +1900,8 @@ app.post('/api/projects', async (req: Request, res: Response) => {
           newProject.status,
           newProject.progress,
           newProject.tokenCharged,
+          newProject.referredByUserId || null,
+          newProject.referralCodeUsed || null,
         ]
       );
 
@@ -1338,6 +1910,43 @@ app.post('/api/projects', async (req: Request, res: Response) => {
          VALUES ($1, $2, $3, $4, $5)`,
         [updateId, id, newProject.updates[0].authorName, newProject.updates[0].authorRole, newProject.updates[0].message]
       );
+
+      if (attributedReferrer) {
+        const referralId = `ref_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+        await client.query(
+          `INSERT INTO referrals (
+             id, referrer_user_id, referral_code, project_id, project_public_id,
+             client_user_id, client_name, client_email,
+             eligible_payment_amount, commission_rate, commission_amount, currency, status
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, $9, 0, 'INR', 'pending')
+           ON CONFLICT (project_id) DO NOTHING`,
+          [
+            referralId,
+            attributedReferrer.id,
+            attributedReferrer.code,
+            id,
+            projectId,
+            newProject.clientId,
+            clientName,
+            clientEmail,
+            COMMISSION_RATE,
+          ]
+        );
+
+        const refNotifId = `notif_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+        await client.query(
+          `INSERT INTO user_notifications (id, user_id, title, body, project_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            refNotifId,
+            attributedReferrer.id,
+            'New Referred Project Request Attributed',
+            `Project ${projectId} (${service}) was submitted via your referral link (${attributedReferrer.code}). Your 10% commission will be calculated and unlocked once the client completes an eligible project payment.`,
+            projectId,
+          ]
+        );
+      }
+
       await client.query('COMMIT');
     } catch (err) {
       if (client) {
@@ -1357,11 +1966,20 @@ app.post('/api/projects', async (req: Request, res: Response) => {
 
   MEMORY_PROJECTS.unshift(newProject);
   logAudit(clientEmail, 'project.submit', `${projectId} (${service}) — ${title}`);
+  if (attributedReferrer) {
+    clearReferralCookie(res, req);
+    logAudit(
+      clientEmail,
+      'referral.project_attributed',
+      `Project ${projectId} attributed to referrer ${attributedReferrer.email} (${attributedReferrer.code})`
+    );
+  }
 
   return res.status(201).json({
     ok: true,
     projectId,
     project: newProject,
+    referralAttributed: Boolean(attributedReferrer),
     message: `Project request ${projectId} received successfully.`,
   });
 });
@@ -2022,33 +2640,6 @@ app.delete('/api/admin/projects/:id', requireAdmin, async (req: Request, res: Re
   return res.status(404).json({ error: 'Project not found.' });
 });
 
-app.get('/api/admin/contact-inquiries', requireAdmin, async (req: Request, res: Response) => {
-  if (!isDbConfigured) {
-    return res.status(503).json({ error: 'Contact inquiry storage is unavailable because the database is not configured.' });
-  }
-
-  const page = Math.max(1, parseInt(String(req.query.page || '1'), 10) || 1);
-  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || '20'), 10) || 20));
-  const offset = (page - 1) * limit;
-
-  try {
-    const countRes = await query('SELECT COUNT(*) AS total FROM contact_inquiries');
-    const inquiriesRes = await query(
-      'SELECT id, name, email, subject, message, created_at FROM contact_inquiries ORDER BY created_at DESC LIMIT $1 OFFSET $2',
-      [limit, offset]
-    );
-    const total = parseInt(countRes.rows[0]?.total || '0', 10);
-    return res.json({
-      ok: true,
-      inquiries: inquiriesRes.rows,
-      pagination: { page, limit, total, totalPages: Math.max(1, Math.ceil(total / limit)) },
-    });
-  } catch (err) {
-    console.error('[Admin Contact Inquiries Query Error]:', err instanceof Error ? err.message : 'Unknown database error');
-    return res.status(500).json({ error: 'Failed to fetch contact inquiries.' });
-  }
-});
-
 app.get('/api/admin/logs', requireAdmin, async (req: Request, res: Response) => {
   const limit = Math.min(200, Math.max(1, parseInt(String(req.query.limit || '50'), 10) || 50));
   const offset = Math.max(0, parseInt(String(req.query.offset || '0'), 10) || 0);
@@ -2128,6 +2719,714 @@ app.post('/api/admin/clients', requireAdmin, (req: Request, res: Response) => {
   }
 
   return res.status(400).json({ error: 'Unknown action.' });
+});
+
+/* -------------------------------------------------------------------------- */
+/*                               REFERRALS & EARNINGS                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Visitor Referral Attribution Endpoint:
+ * Validates a referral code, blocks self-referrals and existing-client overrides,
+ * and sets a tamper-resistant HMAC-SHA256 signed HttpOnly cookie (`tc_ref`).
+ */
+app.post('/api/referrals/track', async (req: Request, res: Response) => {
+  const { code } = req.body || {};
+  const cleanCode = String(code || '').trim().toUpperCase();
+
+  if (!cleanCode || !/^TCR-[A-Z0-9]{4,16}$/.test(cleanCode)) {
+    return res.status(400).json({ error: 'Invalid referral code format.' });
+  }
+
+  const currentUser = await resolveAuthUser(req);
+
+  if (isDbConfigured) {
+    try {
+      const refRes = await query<{
+        id: string;
+        name: string;
+        email: string;
+        suspended: boolean;
+        referral_code: string;
+      }>(
+        'SELECT id, name, email, suspended, referral_code FROM users WHERE UPPER(referral_code) = $1 LIMIT 1',
+        [cleanCode]
+      );
+
+      if (refRes.rows.length === 0 || refRes.rows[0].suspended) {
+        return res.status(404).json({ error: 'Referral code not found or inactive.' });
+      }
+
+      const referrer = refRes.rows[0];
+
+      // Block self-referral
+      if (
+        currentUser &&
+        (currentUser.id === referrer.id || currentUser.email.toLowerCase() === referrer.email.toLowerCase())
+      ) {
+        return res.status(400).json({ error: 'You cannot apply your own referral link.' });
+      }
+
+      // Prevent claiming an existing client who already has projects or prior referral attribution
+      if (currentUser) {
+        const priorProj = await query<{ cnt: string }>(
+          'SELECT COUNT(*) AS cnt FROM projects WHERE client_id = $1 OR LOWER(client_email) = LOWER($2)',
+          [currentUser.id, currentUser.email]
+        );
+        const priorRef = await query<{ cnt: string }>(
+          'SELECT COUNT(*) AS cnt FROM referrals WHERE client_user_id = $1 OR LOWER(client_email) = LOWER($2)',
+          [currentUser.id, currentUser.email]
+        );
+        if (
+          parseInt(priorProj.rows[0]?.cnt || '0', 10) > 0 ||
+          parseInt(priorRef.rows[0]?.cnt || '0', 10) > 0
+        ) {
+          return res.status(200).json({
+            ok: true,
+            attributed: false,
+            message: 'Existing client accounts with prior project history cannot be re-attributed.',
+          });
+        }
+      }
+
+      // First-touch tamper protection: if visitor already has a valid signed referral cookie for another active referrer, keep original attribution
+      const existingCookie = verifyReferralCookie(req.cookies[REFERRAL_COOKIE]);
+      if (existingCookie && existingCookie.referrerId !== referrer.id) {
+        const existingRefUser = await query<{ id: string; name: string; suspended: boolean; referral_code: string }>(
+          'SELECT id, name, suspended, referral_code FROM users WHERE id = $1 LIMIT 1',
+          [existingCookie.referrerId]
+        );
+        if (existingRefUser.rows.length > 0 && !existingRefUser.rows[0].suspended) {
+          return res.status(200).json({
+            ok: true,
+            attributed: true,
+            referralCode: existingRefUser.rows[0].referral_code,
+            referrerName: existingRefUser.rows[0].name.split(' ')[0],
+            message: 'Existing referral attribution preserved.',
+          });
+        }
+      }
+
+      const nowMs = Date.now();
+      const signedToken = signReferralPayload({
+        code: referrer.referral_code,
+        referrerId: referrer.id,
+        iat: nowMs,
+        exp: nowMs + REFERRAL_COOKIE_DURATION_MS,
+      });
+
+      setReferralCookie(res, signedToken, req);
+
+      return res.status(200).json({
+        ok: true,
+        attributed: true,
+        referralCode: referrer.referral_code,
+        referrerName: referrer.name.split(' ')[0],
+      });
+    } catch (err) {
+      console.error('[Referral Track Error]:', err);
+      return res.status(500).json({ error: 'Unable to record referral attribution.' });
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+/**
+ * Authenticated User Referral Summary & Attributed Projects
+ */
+app.get('/api/referrals/me', requireAuth, async (req: Request, res: Response) => {
+  const user = (req as Request & { user: ServerUser }).user;
+  const referralCode = await ensureUserReferralCode(user);
+
+  const origin =
+    (req.headers.origin as string) ||
+    process.env.FRONTEND_URL?.replace(/\/$/, '') ||
+    process.env.APP_URL?.replace(/\/$/, '') ||
+    `${req.protocol}://${req.get('host')}`;
+  const referralLink = `${origin}/refer-and-earn?ref=${encodeURIComponent(referralCode)}`;
+
+  if (isDbConfigured) {
+    try {
+      const rowsRes = await query<{
+        id: string;
+        project_public_id: string;
+        client_name: string;
+        client_email: string;
+        eligible_payment_amount: string;
+        commission_rate: string;
+        commission_amount: string;
+        currency: string;
+        status: 'pending' | 'approved' | 'paid' | 'rejected';
+        payout_reference: string | null;
+        approved_at: string | null;
+        paid_at: string | null;
+        rejected_at: string | null;
+        created_at: string;
+        project_title: string | null;
+        project_service: string | null;
+        project_status: string | null;
+      }>(
+        `SELECT
+           r.id,
+           r.project_public_id,
+           r.client_name,
+           r.client_email,
+           r.eligible_payment_amount,
+           r.commission_rate,
+           r.commission_amount,
+           r.currency,
+           r.status,
+           r.payout_reference,
+           r.approved_at,
+           r.paid_at,
+           r.rejected_at,
+           r.created_at,
+           p.title AS project_title,
+           p.service AS project_service,
+           p.status AS project_status
+         FROM referrals r
+         LEFT JOIN projects p ON p.id = r.project_id
+         WHERE r.referrer_user_id = $1
+         ORDER BY r.created_at DESC`,
+        [user.id]
+      );
+
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+      let pendingReferralsCount = 0;
+      let eligibleCompletedReferrals = 0;
+
+      const byCurrency: Record<
+        string,
+        {
+          currency: string;
+          eligiblePayments: number;
+          pendingCommission: number;
+          approvedCommission: number;
+          paidCommission: number;
+          totalCommissionEarned: number;
+        }
+      > = {};
+
+      const referrals = rowsRes.rows.map((r) => {
+        const payment = Number(r.eligible_payment_amount) || 0;
+        const commission = Number(r.commission_amount) || 0;
+        const rate = Number(r.commission_rate) || COMMISSION_RATE;
+        const rowCurrency = normalizePaymentCurrency(r.currency, 'INR');
+
+        if (!byCurrency[rowCurrency]) {
+          byCurrency[rowCurrency] = {
+            currency: rowCurrency,
+            eligiblePayments: 0,
+            pendingCommission: 0,
+            approvedCommission: 0,
+            paidCommission: 0,
+            totalCommissionEarned: 0,
+          };
+        }
+
+        if (r.status === 'pending') {
+          pendingReferralsCount += 1;
+          byCurrency[rowCurrency].pendingCommission = round2(byCurrency[rowCurrency].pendingCommission + commission);
+        } else if (r.status === 'approved') {
+          eligibleCompletedReferrals += 1;
+          byCurrency[rowCurrency].eligiblePayments = round2(byCurrency[rowCurrency].eligiblePayments + payment);
+          byCurrency[rowCurrency].approvedCommission = round2(byCurrency[rowCurrency].approvedCommission + commission);
+          byCurrency[rowCurrency].totalCommissionEarned = round2(
+            byCurrency[rowCurrency].approvedCommission + byCurrency[rowCurrency].paidCommission
+          );
+        } else if (r.status === 'paid') {
+          eligibleCompletedReferrals += 1;
+          byCurrency[rowCurrency].eligiblePayments = round2(byCurrency[rowCurrency].eligiblePayments + payment);
+          byCurrency[rowCurrency].paidCommission = round2(byCurrency[rowCurrency].paidCommission + commission);
+          byCurrency[rowCurrency].totalCommissionEarned = round2(
+            byCurrency[rowCurrency].approvedCommission + byCurrency[rowCurrency].paidCommission
+          );
+        }
+
+        return {
+          id: r.id,
+          projectPublicId: r.project_public_id,
+          projectTitle: r.project_title || 'Custom Engineering Brief',
+          projectService: r.project_service || 'custom-demand',
+          projectStatus: (r.project_status || 'submitted') as any,
+          clientName: r.client_name,
+          clientEmailMasked: maskEmail(r.client_email),
+          eligiblePaymentAmount: round2(payment),
+          commissionRate: rate,
+          commissionAmount: round2(commission),
+          currency: rowCurrency,
+          status: r.status,
+          payoutReference: r.payout_reference,
+          approvedAt: r.approved_at ? new Date(r.approved_at).toISOString() : null,
+          paidAt: r.paid_at ? new Date(r.paid_at).toISOString() : null,
+          rejectedAt: r.rejected_at ? new Date(r.rejected_at).toISOString() : null,
+          createdAt: new Date(r.created_at).toISOString(),
+        };
+      });
+
+      const activeCurrencies = Object.keys(byCurrency).filter(
+        (c) => byCurrency[c].eligiblePayments > 0 || byCurrency[c].approvedCommission > 0 || byCurrency[c].paidCommission > 0
+      );
+      const primaryCurrency = activeCurrencies.length === 1 ? activeCurrencies[0] : activeCurrencies[0] || 'INR';
+      const primaryBucket = byCurrency[primaryCurrency] || {
+        pendingCommission: 0,
+        approvedCommission: 0,
+        paidCommission: 0,
+        totalCommissionEarned: 0,
+      };
+
+      return res.json({
+        ok: true,
+        referralCode,
+        referralLink,
+        summary: {
+          totalAttributedProjects: referrals.length,
+          eligibleCompletedReferrals,
+          pendingReferralsCount,
+          pendingCommission: round2(primaryBucket.pendingCommission),
+          approvedCommission: round2(primaryBucket.approvedCommission),
+          paidCommission: round2(primaryBucket.paidCommission),
+          totalCommissionEarned: round2(primaryBucket.totalCommissionEarned),
+          commissionRatePercent: 10,
+          currency: primaryCurrency,
+          byCurrency,
+        },
+        referrals,
+      });
+    } catch (err) {
+      console.error('[Referrals Me Query Error]:', err);
+      return res.status(500).json({ error: 'Failed to load your referrals.' });
+    }
+  }
+
+  return res.json({
+    ok: true,
+    referralCode,
+    referralLink,
+    summary: {
+      totalAttributedProjects: 0,
+      eligibleCompletedReferrals: 0,
+      pendingReferralsCount: 0,
+      pendingCommission: 0,
+      approvedCommission: 0,
+      paidCommission: 0,
+      totalCommissionEarned: 0,
+      commissionRatePercent: 10,
+      currency: 'INR',
+      byCurrency: {},
+    },
+    referrals: [],
+  });
+});
+
+/**
+ * Admin Referrals List & Summary Metrics
+ */
+app.get('/api/admin/referrals', requireAdmin, async (req: Request, res: Response) => {
+  const q = String(req.query.q || '').trim().toLowerCase();
+  const statusFilter = String(req.query.status || 'all').trim().toLowerCase();
+
+  if (isDbConfigured) {
+    try {
+      const conditions: string[] = [];
+      const params: unknown[] = [];
+
+      if (q) {
+        params.push(`%${q}%`);
+        conditions.push(
+          `(LOWER(r.project_public_id) LIKE $${params.length} OR LOWER(r.referral_code) LIKE $${params.length} OR LOWER(r.client_name) LIKE $${params.length} OR LOWER(r.client_email) LIKE $${params.length} OR LOWER(u.name) LIKE $${params.length} OR LOWER(u.email) LIKE $${params.length})`
+        );
+      }
+
+      if (['pending', 'approved', 'paid', 'rejected'].includes(statusFilter)) {
+        params.push(statusFilter);
+        conditions.push(`r.status = $${params.length}`);
+      }
+
+      const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+      const rowsRes = await query(
+        `SELECT
+           r.*,
+           u.name AS referrer_name,
+           u.email AS referrer_email,
+           p.title AS project_title,
+           p.service AS project_service,
+           p.status AS project_status,
+           p.budget AS project_budget
+         FROM referrals r
+         JOIN users u ON u.id = r.referrer_user_id
+         LEFT JOIN projects p ON p.id = r.project_id
+         ${whereClause}
+         ORDER BY r.created_at DESC`,
+        params
+      );
+
+      const summaryRes = await query(`
+        SELECT
+          COUNT(*) AS total_attributed,
+          COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+          COUNT(*) FILTER (WHERE status = 'approved') AS approved_count,
+          COUNT(*) FILTER (WHERE status = 'paid') AS paid_count,
+          COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_count
+        FROM referrals
+      `);
+
+      const currencyRes = await query<{
+        currency: string;
+        eligible_payments: string;
+        approved_unpaid: string;
+        paid_comm: string;
+      }>(`
+        SELECT
+          UPPER(COALESCE(currency, 'INR')) AS currency,
+          COALESCE(SUM(eligible_payment_amount) FILTER (WHERE status IN ('approved', 'paid')), 0) AS eligible_payments,
+          COALESCE(SUM(commission_amount) FILTER (WHERE status = 'approved'), 0) AS approved_unpaid,
+          COALESCE(SUM(commission_amount) FILTER (WHERE status = 'paid'), 0) AS paid_comm
+        FROM referrals
+        WHERE status IN ('approved', 'paid')
+        GROUP BY UPPER(COALESCE(currency, 'INR'))
+      `);
+
+      const sRow = summaryRes.rows[0] || {};
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+
+      const byCurrency: Record<
+        string,
+        {
+          currency: string;
+          eligiblePayments: number;
+          approvedUnpaidCommission: number;
+          paidCommission: number;
+        }
+      > = {};
+
+      for (const cRow of currencyRes.rows) {
+        const cCode = normalizePaymentCurrency(cRow.currency, 'INR');
+        byCurrency[cCode] = {
+          currency: cCode,
+          eligiblePayments: round2(Number(cRow.eligible_payments) || 0),
+          approvedUnpaidCommission: round2(Number(cRow.approved_unpaid) || 0),
+          paidCommission: round2(Number(cRow.paid_comm) || 0),
+        };
+      }
+
+      const activeCurrencies = Object.keys(byCurrency);
+      const primaryCurrency = activeCurrencies.length === 1 ? activeCurrencies[0] : activeCurrencies[0] || 'INR';
+      const primaryTotals = byCurrency[primaryCurrency] || {
+        eligiblePayments: 0,
+        approvedUnpaidCommission: 0,
+        paidCommission: 0,
+      };
+
+      const referrals = rowsRes.rows.map((row: any) => ({
+        id: row.id,
+        referrerUserId: row.referrer_user_id,
+        referrerName: row.referrer_name,
+        referrerEmail: row.referrer_email,
+        referralCode: row.referral_code,
+        projectId: row.project_id,
+        projectPublicId: row.project_public_id,
+        projectTitle: row.project_title || 'Custom Engineering Brief',
+        projectService: row.project_service || 'custom-demand',
+        projectStatus: row.project_status || 'submitted',
+        projectBudget: row.project_budget || null,
+        clientUserId: row.client_user_id,
+        clientName: row.client_name,
+        clientEmail: row.client_email,
+        eligiblePaymentAmount: round2(Number(row.eligible_payment_amount) || 0),
+        commissionRate: Number(row.commission_rate) || COMMISSION_RATE,
+        commissionAmount: round2(Number(row.commission_amount) || 0),
+        currency: normalizePaymentCurrency(row.currency, 'INR'),
+        status: row.status,
+        payoutReference: row.payout_reference,
+        adminNotes: row.admin_notes,
+        approvedBy: row.approved_by,
+        approvedAt: row.approved_at ? new Date(row.approved_at).toISOString() : null,
+        paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
+        rejectedAt: row.rejected_at ? new Date(row.rejected_at).toISOString() : null,
+        createdAt: new Date(row.created_at).toISOString(),
+        updatedAt: new Date(row.updated_at).toISOString(),
+      }));
+
+      return res.json({
+        ok: true,
+        summary: {
+          totalAttributedProjects: parseInt(sRow.total_attributed || '0', 10),
+          pendingCount: parseInt(sRow.pending_count || '0', 10),
+          approvedCount: parseInt(sRow.approved_count || '0', 10),
+          paidCount: parseInt(sRow.paid_count || '0', 10),
+          rejectedCount: parseInt(sRow.rejected_count || '0', 10),
+          totalEligiblePayments: primaryTotals.eligiblePayments,
+          totalApprovedUnpaidCommission: primaryTotals.approvedUnpaidCommission,
+          totalPaidCommission: primaryTotals.paidCommission,
+          currency: primaryCurrency,
+          byCurrency,
+        },
+        referrals,
+      });
+    } catch (err) {
+      console.error('[Admin Referrals Query Error]:', err);
+      return res.status(500).json({ error: 'Database error fetching referrals.' });
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
+});
+
+/**
+ * Admin Referral Commission Verification, Approval (10%), Rejection & Payout Endpoint
+ */
+app.patch('/api/admin/referrals/:id', requireAdmin, async (req: Request, res: Response) => {
+  const referralId = req.params.id;
+  const { action, eligiblePaymentAmount, currency, payoutReference, adminNotes } = req.body || {};
+  const adminActor = (req as Request & { user: ServerUser }).user;
+
+  if (!['approve', 'reject', 'mark_paid'].includes(action)) {
+    return res.status(400).json({ error: "Invalid action. Must be 'approve', 'reject', or 'mark_paid'." });
+  }
+
+  if (isDbConfigured && pool) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      const rRes = await client.query('SELECT * FROM referrals WHERE id = $1 FOR UPDATE', [referralId]);
+      if (rRes.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'Referral record not found.' });
+      }
+
+      const current = rRes.rows[0];
+      const cleanNotes = typeof adminNotes === 'string' && adminNotes.trim().length > 0 ? adminNotes.trim().slice(0, 1000) : null;
+
+      if (action === 'approve') {
+        if (current.status === 'approved' || current.status === 'paid') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: `Commission for referral ${current.project_public_id} has already been ${current.status}. Duplicate commission approval is not permitted.`,
+          });
+        }
+
+        const numPayment = Number(eligiblePaymentAmount);
+        if (!Number.isFinite(numPayment) || numPayment <= 0 || numPayment > 10000000) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: 'A valid positive eligible payment amount actually received is required to approve a commission.',
+          });
+        }
+
+        if (
+          currency !== undefined &&
+          !(SUPPORTED_PAYMENT_CURRENCIES as readonly string[]).includes(String(currency).trim().toUpperCase())
+        ) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({
+            error: `Unsupported payment currency. Supported currencies: ${SUPPORTED_PAYMENT_CURRENCIES.join(', ')}.`,
+          });
+        }
+
+        const verifiedCurrency = normalizePaymentCurrency(currency, normalizePaymentCurrency(current.currency, 'INR'));
+        const verifiedPayment = Math.round(numPayment * 100) / 100;
+        // Strictly enforce 10% commission calculation on the server in the exact payment currency (no conversion)
+        const calculatedCommission = Math.round(verifiedPayment * COMMISSION_RATE * 100) / 100;
+
+        const approveUpdate = await client.query(
+          `UPDATE referrals
+           SET eligible_payment_amount = $1,
+               commission_rate = $2,
+               commission_amount = $3,
+               currency = $4,
+               status = 'approved',
+               admin_notes = COALESCE($5, admin_notes),
+               approved_by = $6,
+               approved_at = NOW(),
+               rejected_at = NULL,
+               updated_at = NOW()
+           WHERE id = $7 AND status IN ('pending', 'rejected')`,
+          [verifiedPayment, COMMISSION_RATE, calculatedCommission, verifiedCurrency, cleanNotes, adminActor.email, referralId]
+        );
+
+        if (approveUpdate.rowCount !== 1) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Referral status changed concurrently; approval was not applied.' });
+        }
+
+        const notifId = `notif_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+        await client.query(
+          `INSERT INTO user_notifications (id, user_id, title, body, project_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            notifId,
+            current.referrer_user_id,
+            'Referral Commission Approved (10%)',
+            `Your 10% referral commission of ${formatMoneyWithCurrency(calculatedCommission, verifiedCurrency)} (on verified project payment of ${formatMoneyWithCurrency(verifiedPayment, verifiedCurrency)}) for project ${current.project_public_id} has been approved.`,
+            current.project_public_id,
+          ]
+        );
+
+        await client.query('COMMIT');
+
+        logAudit(
+          adminActor.email,
+          'admin.referral_approve',
+          `Project ${current.project_public_id}: verified payment ${formatMoneyWithCurrency(verifiedPayment, verifiedCurrency)} -> 10% commission ${formatMoneyWithCurrency(calculatedCommission, verifiedCurrency)}`
+        );
+      } else if (action === 'mark_paid') {
+        if (current.status === 'paid') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'This referral commission has already been marked as paid.' });
+        }
+        if (current.status !== 'approved') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Only approved commissions can be marked as paid.' });
+        }
+
+        const cleanPayoutRef =
+          typeof payoutReference === 'string' && payoutReference.trim().length > 0
+            ? payoutReference.trim().slice(0, 160)
+            : `PAYOUT-${new Date().toISOString().slice(0, 10)}`;
+
+        const paidUpdate = await client.query(
+          `UPDATE referrals
+           SET status = 'paid',
+               payout_reference = $1,
+               admin_notes = COALESCE($2, admin_notes),
+               paid_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $3 AND status = 'approved'`,
+          [cleanPayoutRef, cleanNotes, referralId]
+        );
+
+        if (paidUpdate.rowCount !== 1) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Referral status changed concurrently; payout update was not applied.' });
+        }
+
+        const rowCurrency = normalizePaymentCurrency(current.currency, 'INR');
+        const commAmt = Number(current.commission_amount) || 0;
+
+        const notifId = `notif_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+        await client.query(
+          `INSERT INTO user_notifications (id, user_id, title, body, project_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            notifId,
+            current.referrer_user_id,
+            'Referral Commission Paid',
+            `Your approved commission of ${formatMoneyWithCurrency(commAmt, rowCurrency)} for project ${current.project_public_id} has been paid (Ref: ${cleanPayoutRef}).`,
+            current.project_public_id,
+          ]
+        );
+
+        await client.query('COMMIT');
+
+        logAudit(
+          adminActor.email,
+          'admin.referral_paid',
+          `Project ${current.project_public_id}: paid ${formatMoneyWithCurrency(commAmt, rowCurrency)} (Ref: ${cleanPayoutRef})`
+        );
+      } else if (action === 'reject') {
+        if (current.status === 'paid') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Cannot reject a referral commission that has already been paid.' });
+        }
+
+        const rejectUpdate = await client.query(
+          `UPDATE referrals
+           SET status = 'rejected',
+               eligible_payment_amount = 0,
+               commission_amount = 0,
+               admin_notes = COALESCE($1, admin_notes),
+               rejected_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $2 AND status IN ('pending', 'approved')`,
+          [cleanNotes, referralId]
+        );
+
+        if (rejectUpdate.rowCount !== 1 && current.status !== 'rejected') {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Referral status changed concurrently; rejection was not applied.' });
+        }
+
+        await client.query('COMMIT');
+
+        logAudit(
+          adminActor.email,
+          'admin.referral_reject',
+          `Project ${current.project_public_id} referral marked as rejected${cleanNotes ? `: ${cleanNotes}` : ''}`
+        );
+      }
+
+      // Fetch updated row with joined details
+      const updatedRes = await query(
+        `SELECT
+           r.*,
+           u.name AS referrer_name,
+           u.email AS referrer_email,
+           p.title AS project_title,
+           p.service AS project_service,
+           p.status AS project_status,
+           p.budget AS project_budget
+         FROM referrals r
+         JOIN users u ON u.id = r.referrer_user_id
+         LEFT JOIN projects p ON p.id = r.project_id
+         WHERE r.id = $1`,
+        [referralId]
+      );
+
+      const row = updatedRes.rows[0];
+      const round2 = (n: number) => Math.round(n * 100) / 100;
+
+      return res.json({
+        ok: true,
+        referral: {
+          id: row.id,
+          referrerUserId: row.referrer_user_id,
+          referrerName: row.referrer_name,
+          referrerEmail: row.referrer_email,
+          referralCode: row.referral_code,
+          projectId: row.project_id,
+          projectPublicId: row.project_public_id,
+          projectTitle: row.project_title || 'Custom Engineering Brief',
+          projectService: row.project_service || 'custom-demand',
+          projectStatus: row.project_status || 'submitted',
+          projectBudget: row.project_budget || null,
+          clientUserId: row.client_user_id,
+          clientName: row.client_name,
+          clientEmail: row.client_email,
+          eligiblePaymentAmount: round2(Number(row.eligible_payment_amount) || 0),
+          commissionRate: Number(row.commission_rate) || COMMISSION_RATE,
+          commissionAmount: round2(Number(row.commission_amount) || 0),
+          currency: normalizePaymentCurrency(row.currency, 'INR'),
+          status: row.status,
+          payoutReference: row.payout_reference,
+          adminNotes: row.admin_notes,
+          approvedBy: row.approved_by,
+          approvedAt: row.approved_at ? new Date(row.approved_at).toISOString() : null,
+          paidAt: row.paid_at ? new Date(row.paid_at).toISOString() : null,
+          rejectedAt: row.rejected_at ? new Date(row.rejected_at).toISOString() : null,
+          createdAt: new Date(row.created_at).toISOString(),
+          updatedAt: new Date(row.updated_at).toISOString(),
+        },
+        message:
+          action === 'approve'
+            ? 'Referral commission verified and approved at 10%.'
+            : action === 'mark_paid'
+              ? 'Commission marked as paid.'
+              : 'Referral marked as rejected.',
+      });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      console.error('[Admin Referral Update Error]:', err);
+      return res.status(500).json({ error: 'Database error updating referral status.' });
+    } finally {
+      client.release();
+    }
+  }
+
+  return res.status(503).json({ error: 'Database service unavailable.' });
 });
 
 // 404 handler for API routes

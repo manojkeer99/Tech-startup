@@ -48,7 +48,11 @@ export function GoogleSignInButton({
   const [gisLoaded, setGisLoaded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [configNotice, setConfigNotice] = useState<string | null>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const googleBtnContainerRef = useRef<HTMLDivElement>(null);
+  const lastRenderedWidthRef = useRef<number>(0);
+  const onSuccessRef = useRef(onSuccess);
+  onSuccessRef.current = onSuccess;
 
   // 1. Fetch Google OAuth configuration from the backend
   useEffect(() => {
@@ -103,11 +107,36 @@ export function GoogleSignInButton({
     document.head.appendChild(script);
   }, []);
 
-  // 3. Initialize Google Identity Services when script & clientId are available
+  // 3. Initialize Google Identity Services & responsively render button with valid pixel width
   useEffect(() => {
     if (!gisLoaded || !clientId || typeof window === 'undefined' || !window.google?.accounts?.id) {
       return;
     }
+
+    const renderGisButton = (force = false) => {
+      const container = googleBtnContainerRef.current;
+      const wrapper = wrapperRef.current;
+      if (!container || !wrapper || !window.google?.accounts?.id) return;
+
+      const measured = Math.floor(wrapper.getBoundingClientRect().width || wrapper.clientWidth || 320);
+      // Google Identity Services requires an integer pixel width between 200 and 400
+      const targetWidth = Math.min(400, Math.max(200, measured));
+
+      if (!force && Math.abs(targetWidth - lastRenderedWidthRef.current) < 2 && container.childElementCount > 0) {
+        return;
+      }
+
+      lastRenderedWidthRef.current = targetWidth;
+      container.innerHTML = '';
+      window.google.accounts.id.renderButton(container, {
+        theme: 'outline',
+        size: 'large',
+        text: 'signin_with',
+        shape: 'rectangular',
+        width: targetWidth,
+        logo_alignment: 'left',
+      });
+    };
 
     try {
       window.google.accounts.id.initialize({
@@ -123,7 +152,7 @@ export function GoogleSignInButton({
             const result = await store.loginWithGoogleCredential(response.credential);
             if (result.success && result.user) {
               push('success', `Welcome, ${result.user.name.split(' ')[0]}! Signed in with Google.`);
-              if (onSuccess) onSuccess();
+              if (onSuccessRef.current) onSuccessRef.current();
             } else {
               push('error', result.error || 'Google authentication could not be completed.');
             }
@@ -137,22 +166,31 @@ export function GoogleSignInButton({
         cancel_on_tap_outside: true,
       });
 
-      // Render official Google button into container if mounted
-      if (googleBtnContainerRef.current) {
-        googleBtnContainerRef.current.innerHTML = '';
-        window.google.accounts.id.renderButton(googleBtnContainerRef.current, {
-          theme: 'outline',
-          size: 'large',
-          text: 'signin_with',
-          shape: 'rectangular',
-          width: '100%',
-          logo_alignment: 'left',
-        });
-      }
+      renderGisButton(true);
     } catch (err) {
       console.warn('[Google Identity Init Error]:', err);
     }
-  }, [gisLoaded, clientId, onSuccess, push]);
+
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null;
+    const handleResize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => renderGisButton(false), 100);
+    };
+
+    let observer: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined' && wrapperRef.current) {
+      observer = new ResizeObserver(handleResize);
+      observer.observe(wrapperRef.current);
+    } else {
+      window.addEventListener('resize', handleResize);
+    }
+
+    return () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      if (observer) observer.disconnect();
+      else window.removeEventListener('resize', handleResize);
+    };
+  }, [gisLoaded, clientId, push]);
 
   const handleClick = () => {
     if (loading) return;
@@ -181,17 +219,20 @@ export function GoogleSignInButton({
   };
 
   return (
-    <div className="w-full space-y-2">
+    <div className="w-full space-y-2" data-config-checked={configChecked ? 'true' : 'false'}>
       {/* Official Google Button Container (Rendered by GIS when client ID is active) */}
       {clientId && gisLoaded ? (
-        <div className="relative w-full overflow-hidden rounded-xl border border-slate-300 bg-white shadow-sm transition hover:border-slate-400">
+        <div
+          ref={wrapperRef}
+          className="relative flex w-full items-center justify-center min-h-[44px]"
+        >
           <div
             ref={googleBtnContainerRef}
-            className="w-full flex justify-center [&>div]:!w-full [&_iframe]:!w-full"
-            style={{ minHeight: '44px' }}
+            className="flex max-w-full items-center justify-center overflow-hidden rounded-lg"
+            style={{ minHeight: '40px' }}
           />
           {loading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-white/80 backdrop-blur-xs text-xs font-medium text-slate-800">
+            <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-white/85 backdrop-blur-xs text-xs font-medium text-slate-800">
               <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-slate-400 border-t-blue-600 mr-2" />
               Verifying Google credential...
             </div>

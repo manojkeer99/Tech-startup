@@ -18,6 +18,8 @@ import { ForgotPasswordPage } from '@/pages/forgot-password';
 import { ResetPasswordPage } from '@/pages/reset-password';
 import { DashboardPage } from '@/pages/dashboard';
 import { AdminPage } from '@/pages/admin';
+import { ReferAndEarnPage } from '@/pages/refer-and-earn';
+import { trackReferralCode } from '@/lib/admin-api';
 import { store } from '@/lib/store';
 
 export default function App() {
@@ -47,6 +49,16 @@ export default function App() {
     window.addEventListener('popstate', handlePopState);
     return () => window.removeEventListener('popstate', handlePopState);
   }, []);
+
+  // Preserve referral attribution on the server when a visitor arrives through any URL with ?ref=CODE
+  const refParam = searchParams.get('ref');
+  useEffect(() => {
+    if (!refParam) return;
+    const clean = refParam.trim().toUpperCase();
+    if (/^TCR-[A-Z0-9]{4,16}$/.test(clean)) {
+      trackReferralCode(clean).catch(() => {});
+    }
+  }, [refParam]);
 
   const navigate = (pathWithSearch: string) => {
     const [path, search] = pathWithSearch.split('?');
@@ -96,6 +108,11 @@ export default function App() {
     if (currentPath === '/project') {
       const initialService = searchParams.get('service') || undefined;
       return <ProjectIntakePage initialService={initialService} navigate={navigate} />;
+    }
+
+    // 3b. Refer & Earn (/refer-and-earn)
+    if (currentPath === '/refer-and-earn') {
+      return <ReferAndEarnPage navigate={navigate} incomingRefCode={refParam || undefined} />;
     }
 
     // 4. Contact (/contact)

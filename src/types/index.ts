@@ -14,6 +14,7 @@ export type User = {
   authProvider?: 'email' | 'google';
   googleId?: string | null;
   avatarUrl?: string | null;
+  referralCode?: string | null;
 };
 
 export type PublicUser = Omit<User, 'passwordHash'>;
@@ -129,3 +130,78 @@ export type ServiceDefinition = {
   enabled: boolean;
   tokenCost: number;
 };
+
+export type ReferralStatus = 'pending' | 'approved' | 'paid' | 'rejected';
+
+export type UserReferralItem = {
+  id: string;
+  projectPublicId: string;
+  projectTitle: string;
+  projectService: string;
+  projectStatus: ProjectStatus;
+  clientName: string;
+  clientEmailMasked: string;
+  eligiblePaymentAmount: number;
+  commissionRate: number;
+  commissionAmount: number;
+  currency: string;
+  status: ReferralStatus;
+  payoutReference?: string | null;
+  approvedAt?: string | null;
+  paidAt?: string | null;
+  rejectedAt?: string | null;
+  createdAt: string;
+};
+
+export type ReferralCurrencyTotals = {
+  currency: string;
+  eligiblePayments: number;
+  pendingCommission: number;
+  approvedCommission: number;
+  paidCommission: number;
+  totalCommissionEarned: number;
+};
+
+export type UserReferralSummary = {
+  totalAttributedProjects: number;
+  eligibleCompletedReferrals: number;
+  pendingReferralsCount: number;
+  pendingCommission: number;
+  approvedCommission: number;
+  paidCommission: number;
+  totalCommissionEarned: number;
+  commissionRatePercent: number;
+  currency: string;
+  byCurrency?: Record<string, ReferralCurrencyTotals>;
+};
+
+export type AdminReferralItem = {
+  id: string;
+  referrerUserId: string;
+  referrerName: string;
+  referrerEmail: string;
+  referralCode: string;
+  projectId: string;
+  projectPublicId: string;
+  projectTitle: string;
+  projectService: string;
+  projectStatus: ProjectStatus;
+  projectBudget?: string | null;
+  clientUserId?: string | null;
+  clientName: string;
+  clientEmail: string;
+  eligiblePaymentAmount: number;
+  commissionRate: number;
+  commissionAmount: number;
+  currency: string;
+  status: ReferralStatus;
+  payoutReference?: string | null;
+  adminNotes?: string | null;
+  approvedBy?: string | null;
+  approvedAt?: string | null;
+  paidAt?: string | null;
+  rejectedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+

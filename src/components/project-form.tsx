@@ -47,7 +47,7 @@ export function ProjectForm({
 }) {
   const { push } = useToast();
   const { t } = useI18n();
-  const sessionUser = store.getSessionUser();
+  const [sessionUser, setSessionUser] = useState(() => store.getSessionUser());
 
   const [service, setService] = useState<string>(initialService || 'website-development');
   const [form, setForm] = useState({
@@ -72,6 +72,24 @@ export function ProjectForm({
 
   // Anti-abuse: submission throttle ref
   const lastSubmitRef = useRef<number>(0);
+
+  useEffect(() => {
+    const syncSession = () => {
+      const current = store.getSessionUser();
+      setSessionUser(current);
+      if (current) {
+        setForm((prev) => ({
+          ...prev,
+          name: prev.name || current.name || '',
+          email: prev.email || current.email || '',
+          phone: prev.phone || current.phone || '',
+          age: prev.age || (current.age ? String(current.age) : ''),
+        }));
+      }
+    };
+    syncSession();
+    return store.subscribe(syncSession);
+  }, []);
 
   useEffect(() => {
     if (initialService) {

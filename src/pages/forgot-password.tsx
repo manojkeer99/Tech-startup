@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { TcMonogram, IconMail, IconArrow, IconCheck, IconCopy } from '@/components/icons';
 import { Button, Field, Input } from '@/components/ui';
+import { TurnstileWidget, type TurnstileConfigState } from '@/components/turnstile-widget';
 import { useToast } from '@/components/toast';
 import { useI18n } from '@/lib/i18n';
 import { store } from '@/lib/store';
@@ -16,23 +17,47 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
   const [busy, setBusy] = useState(false);
   const [token, setToken] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const [turnstileConfig, setTurnstileConfig] = useState<TurnstileConfigState>({
+    enabled: false,
+    required: false,
+    misconfigured: false,
+    mode: 'development-bypass',
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !email.includes('@')) {
       return push('error', 'Please enter a valid email address.');
     }
+    if (turnstileConfig.misconfigured) {
+      return push('error', 'Security verification is misconfigured on the server.');
+    }
+    if (turnstileConfig.required && !turnstileToken) {
+      return push('error', 'Please complete the Cloudflare Turnstile security check.');
+    }
 
     setBusy(true);
     try {
-      const res = await store.requestPasswordReset(email);
+      const res = await store.requestPasswordReset(email, turnstileToken);
+      if (!res.success) {
+        setTurnstileToken(null);
+        setTurnstileResetKey((k) => k + 1);
+        push('error', res.error || 'Failed to generate reset link.');
+        return;
+      }
       if (res.token) {
         setToken(res.token);
         push('success', 'Password reset token generated successfully.');
       } else {
+        setTurnstileToken(null);
+        setTurnstileResetKey((k) => k + 1);
         push('info', 'If that email is registered, a reset link has been dispatched.');
       }
     } catch {
+      setTurnstileToken(null);
+      setTurnstileResetKey((k) => k + 1);
       push('error', 'Failed to generate reset link.');
     } finally {
       setBusy(false);
@@ -123,7 +148,20 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
               />
             </Field>
 
-            <Button type="submit" size="lg" loading={busy} className="w-full mt-2">
+            <TurnstileWidget
+              action="forgot_password"
+              resetKey={turnstileResetKey}
+              onVerify={setTurnstileToken}
+              onConfigChange={setTurnstileConfig}
+            />
+
+            <Button
+              type="submit"
+              size="lg"
+              loading={busy}
+              disabled={busy || turnstileConfig.misconfigured || (turnstileConfig.required && !turnstileToken)}
+              className="w-full mt-2"
+            >
               <span>{t('sendResetLink')}</span>
               {!busy && <IconArrow className="h-4 w-4" />}
             </Button>

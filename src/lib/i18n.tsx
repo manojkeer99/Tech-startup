@@ -124,7 +124,7 @@ export const DICTIONARY = {
     preferEmail: 'Direct email: thecreators.pvt.ltd@gmail.com',
 
     // Auth
-    loginTitle: 'Client & Admin Portal',
+    loginTitle: 'Welcome Back',
     loginSubtitle: 'Access your projects, deliverables, and milestone tracker.',
     password: 'Password',
     newPassword: 'New password',
@@ -329,7 +329,7 @@ export const DICTIONARY = {
     preferEmail: 'सीधा ईमेल: thecreators.pvt.ltd@gmail.com',
 
     // Auth
-    loginTitle: 'क्लाइंट एवं एडमिन पोर्टल',
+    loginTitle: 'वापसी पर स्वागत है',
     loginSubtitle: 'अपने प्रोजेक्ट्स, डिलिवरेबल्स और माइलस्टोन ट्रैकर तक पहुंचें।',
     password: 'पासवर्ड',
     newPassword: 'नया पासवर्ड',

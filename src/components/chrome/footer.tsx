@@ -1,6 +1,7 @@
+import { useState, useEffect } from 'react';
 import { TcMonogram, IconDiscord, IconInstagram, IconMail, IconArrow } from '../icons';
 import { useI18n } from '@/lib/i18n';
-import { OFFICIAL_CHANNELS } from '@/lib/store';
+import { OFFICIAL_CHANNELS, store } from '@/lib/store';
 import { SERVICE_DEFINITIONS } from '@/lib/service-meta';
 
 interface FooterProps {
@@ -9,6 +10,13 @@ interface FooterProps {
 
 export function Footer({ navigate }: FooterProps) {
   const { t } = useI18n();
+  const [sessionUser, setSessionUser] = useState(store.getSessionUser());
+
+  useEffect(() => {
+    return store.subscribe(() => {
+      setSessionUser(store.getSessionUser());
+    });
+  }, []);
 
   return (
     <footer className="relative border-t border-[var(--color-line)] bg-[var(--color-abyss)] pt-12 sm:pt-16 pb-10 sm:pb-12">
@@ -99,39 +107,69 @@ export function Footer({ navigate }: FooterProps) {
               <li>
                 <button
                   type="button"
+                  onClick={() => navigate('/refer-and-earn')}
+                  className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer inline-flex items-center gap-1.5"
+                >
+                  <span>Refer &amp; Earn</span>
+                  <span className="rounded bg-violet-500/20 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-violet-300">
+                    10%
+                  </span>
+                </button>
+              </li>
+              <li>
+                <button
+                  type="button"
                   onClick={() => navigate('/contact')}
                   className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
                 >
                   {t('navContact')}
                 </button>
               </li>
-              <li>
-                <button
-                  type="button"
-                  onClick={() => navigate('/dashboard')}
-                  className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
-                >
-                  {t('navDashboard')}
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  onClick={() => navigate('/login')}
-                  className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
-                >
-                  {t('navLogin')}
-                </button>
-              </li>
-              <li>
-                <button
-                  type="button"
-                  onClick={() => navigate('/register')}
-                  className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
-                >
-                  {t('navSignup')}
-                </button>
-              </li>
+              {sessionUser ? (
+                <>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/dashboard')}
+                      className="text-[var(--color-orchid)] font-semibold hover:text-[var(--color-ink)] transition cursor-pointer"
+                    >
+                      {t('navDashboard')}
+                    </button>
+                  </li>
+                  {sessionUser.role === 'admin' && (
+                    <li>
+                      <button
+                        type="button"
+                        onClick={() => navigate('/admin')}
+                        className="text-amber-300 font-semibold hover:text-[var(--color-ink)] transition cursor-pointer"
+                      >
+                        {t('navAdmin')}
+                      </button>
+                    </li>
+                  )}
+                </>
+              ) : (
+                <>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/login')}
+                      className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
+                    >
+                      {t('navLogin')}
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/register')}
+                      className="text-[var(--color-muted)] hover:text-[var(--color-ink)] transition cursor-pointer"
+                    >
+                      {t('navSignup')}
+                    </button>
+                  </li>
+                </>
+              )}
             </ul>
           </div>
 
@@ -171,14 +209,6 @@ export function Footer({ navigate }: FooterProps) {
           <p>© {new Date().getFullYear()} THE CREATORS PVT. LTD. All rights reserved.</p>
           <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-6 font-mono text-[10px] sm:text-[11px]">
             <span>Build · Break · On Demand</span>
-            <span className="hidden sm:inline">·</span>
-            <button
-              type="button"
-              onClick={() => navigate('/admin/login')}
-              className="text-[var(--color-faint)] hover:text-[var(--color-orchid)] transition cursor-pointer"
-            >
-              Admin Access
-            </button>
           </div>
         </div>
       </div>

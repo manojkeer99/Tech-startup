@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { TcMonogram, IconMenu, IconX, IconUser, IconShield, IconArrow } from '../icons';
+import { TcMonogram, IconMenu, IconX, IconUser, IconShield, IconArrow, IconLogout } from '../icons';
 import { ThemeToggle } from '../theme-toggle';
 import { LangToggle } from '../lang-toggle';
 import { useI18n } from '@/lib/i18n';
@@ -17,10 +17,12 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
   const [scrolled, setScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [sessionUser, setSessionUser] = useState(store.getSessionUser());
+  const [sessionChecked, setSessionChecked] = useState(store.isSessionChecked());
 
   useEffect(() => {
     const unsub = store.subscribe(() => {
       setSessionUser(store.getSessionUser());
+      setSessionChecked(store.isSessionChecked());
     });
     return unsub;
   }, []);
@@ -32,8 +34,9 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  const handleLogout = () => {
-    store.logout();
+  const handleLogout = async () => {
+    setMobileMenuOpen(false);
+    await store.logout();
     push('info', 'Logged out. See you soon.');
     navigate('/');
   };
@@ -41,6 +44,7 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
   const navLinks = [
     { path: '/services', label: t('navServices') },
     { path: '/#process', label: t('navProcess') },
+    { path: '/refer-and-earn', label: 'Referral' },
     { path: '/#community', label: t('navCommunity') },
     { path: '/contact', label: t('navContact') },
   ];
@@ -91,7 +95,7 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
         </button>
 
         {/* Zone 2: Navigation Links */}
-        <nav className="hidden md:flex items-center gap-7">
+        <nav className="hidden lg:flex items-center gap-6">
           {navLinks.map((l) => (
             <button
               key={l.path}
@@ -109,36 +113,44 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
         </nav>
 
         {/* Zone 3: Actions + Theme + Lang + Auth */}
-        <div className="hidden md:flex items-center gap-3">
+        <div className="hidden md:flex items-center gap-2.5">
           <LangToggle />
           <ThemeToggle />
 
           {sessionUser ? (
             <div className="flex items-center gap-2 border-l border-[var(--color-line)] pl-3">
+              {sessionUser.role === 'admin' && (
+                <button
+                  type="button"
+                  onClick={() => handleLinkClick('/admin')}
+                  className="flex items-center gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1.5 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 transition cursor-pointer"
+                >
+                  <IconShield className="h-3.5 w-3.5 text-amber-400" />
+                  <span>{t('navAdmin')}</span>
+                </button>
+              )}
+
               <button
                 type="button"
-                onClick={() => handleLinkClick(sessionUser.role === 'admin' ? '/admin' : '/dashboard')}
+                onClick={() => handleLinkClick('/dashboard')}
                 className="flex items-center gap-2 rounded-lg border border-[var(--color-violet)]/40 bg-[var(--color-violet)]/10 px-3 py-1.5 text-xs font-semibold text-[var(--color-orchid)] hover:bg-[var(--color-violet)]/20 transition cursor-pointer"
               >
-                {sessionUser.role === 'admin' ? (
-                  <IconShield className="h-3.5 w-3.5 text-amber-400" />
-                ) : (
-                  <IconUser className="h-3.5 w-3.5" />
-                )}
-                <span>{sessionUser.role === 'admin' ? t('navAdmin') : t('navDashboard')}</span>
+                <IconUser className="h-3.5 w-3.5" />
+                <span>{t('navDashboard')}</span>
               </button>
 
               <button
                 type="button"
                 onClick={handleLogout}
-                className="rounded-lg p-2 text-[var(--color-faint)] hover:text-[var(--color-ink)] hover:bg-[var(--color-raise)] transition cursor-pointer"
+                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-line)] bg-[var(--color-raise)]/60 px-2.5 py-1.5 text-xs font-medium text-[var(--color-muted)] hover:text-rose-400 hover:border-rose-500/30 transition cursor-pointer"
                 title={t('navLogout')}
                 aria-label={t('navLogout')}
               >
-                <IconX className="h-3.5 w-3.5" />
+                <IconLogout className="h-3.5 w-3.5" />
+                <span className="hidden xl:inline">{t('navLogout')}</span>
               </button>
             </div>
-          ) : (
+          ) : sessionChecked ? (
             <div className="flex items-center gap-2 border-l border-[var(--color-line)] pl-3">
               <button
                 type="button"
@@ -155,6 +167,8 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
                 {t('navSignup')}
               </button>
             </div>
+          ) : (
+            <div className="h-8 w-28 border-l border-[var(--color-line)] pl-3" aria-hidden="true" />
           )}
 
           <button
@@ -186,6 +200,11 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
         <div className="border-b border-[var(--color-line)] bg-[var(--color-panel)] px-5 py-5 shadow-2xl md:hidden animate-in slide-in-from-top duration-200">
           <div className="flex items-center justify-between pb-4 border-b border-[var(--color-line)]">
             <LangToggle />
+            {sessionUser && (
+              <span className="font-mono text-xs text-[var(--color-orchid)] truncate max-w-[180px]">
+                {sessionUser.name}
+              </span>
+            )}
           </div>
 
           <div className="space-y-1.5 py-4">
@@ -211,23 +230,34 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
             </button>
 
             {sessionUser ? (
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => handleLinkClick(sessionUser.role === 'admin' ? '/admin' : '/dashboard')}
-                  className="flex-1 py-2.5 rounded-xl border border-[var(--color-violet)] bg-[var(--color-violet)]/10 text-center text-xs font-semibold text-[var(--color-orchid)]"
-                >
-                  {sessionUser.role === 'admin' ? t('navAdmin') : t('navDashboard')}
-                </button>
+              <div className="space-y-2">
+                <div className="flex gap-2">
+                  {sessionUser.role === 'admin' && (
+                    <button
+                      type="button"
+                      onClick={() => handleLinkClick('/admin')}
+                      className="flex-1 py-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 text-center text-xs font-semibold text-amber-300"
+                    >
+                      {t('navAdmin')}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleLinkClick('/dashboard')}
+                    className="flex-1 py-2.5 rounded-xl border border-[var(--color-violet)] bg-[var(--color-violet)]/10 text-center text-xs font-semibold text-[var(--color-orchid)]"
+                  >
+                    {t('navDashboard')}
+                  </button>
+                </div>
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="px-4 py-2.5 rounded-xl border border-[var(--color-line)] text-center text-xs text-[var(--color-muted)] hover:text-rose-400"
+                  className="w-full py-2.5 rounded-xl border border-[var(--color-line)] text-center text-xs text-[var(--color-muted)] hover:text-rose-400"
                 >
                   {t('navLogout')}
                 </button>
               </div>
-            ) : (
+            ) : sessionChecked ? (
               <div className="flex gap-2">
                 <button
                   type="button"
@@ -244,10 +274,11 @@ export function Navbar({ currentPath, navigate }: NavbarProps) {
                   {t('navSignup')}
                 </button>
               </div>
-            )}
+            ) : null}
           </div>
         </div>
       )}
     </header>
   );
 }
+

@@ -1,5 +1,13 @@
 import { api } from './api';
-import type { Project, ProjectStatus, AuditLog } from '@/types';
+import type {
+  Project,
+  ProjectStatus,
+  AuditLog,
+  ReferralStatus,
+  UserReferralItem,
+  UserReferralSummary,
+  AdminReferralItem,
+} from '@/types';
 
 export interface AdminStats {
   totalUsers: number;
@@ -147,27 +155,6 @@ export interface AdminLogsResponse {
   offset: number;
 }
 
-
-export interface AdminContactInquiry {
-  id: string;
-  name: string;
-  email: string;
-  subject: string;
-  message: string;
-  created_at: string;
-}
-
-export interface AdminContactInquiriesResponse {
-  ok: boolean;
-  inquiries: AdminContactInquiry[];
-  pagination: PaginationMeta;
-}
-
-export async function fetchAdminContactInquiries(page = 1, limit = 20): Promise<AdminContactInquiriesResponse> {
-  const query = new URLSearchParams({ page: String(page), limit: String(limit) });
-  return api<AdminContactInquiriesResponse>(`/api/admin/contact-inquiries?${query.toString()}`);
-}
-
 export interface AdminSystemInfo {
   serverTime: string;
   uptimeSeconds: number;
@@ -268,3 +255,94 @@ export async function fetchAdminLogs(limit = 50, offset = 0): Promise<AdminLogsR
 export async function fetchAdminSystemStatus(): Promise<AdminSystemStatusResponse> {
   return api<AdminSystemStatusResponse>('/api/admin/system');
 }
+
+/* -------------------------------------------------------------------------- */
+/*                               REFERRAL APIS                                */
+/* -------------------------------------------------------------------------- */
+
+export interface ReferralTrackResponse {
+  ok: boolean;
+  attributed: boolean;
+  referralCode?: string;
+  referrerName?: string;
+  message?: string;
+}
+
+export interface MyReferralsResponse {
+  ok: boolean;
+  referralCode: string;
+  referralLink: string;
+  summary: UserReferralSummary;
+  referrals: UserReferralItem[];
+}
+
+export interface AdminReferralsSummary {
+  totalAttributedProjects: number;
+  pendingCount: number;
+  approvedCount: number;
+  paidCount: number;
+  rejectedCount: number;
+  totalEligiblePayments: number;
+  totalApprovedUnpaidCommission: number;
+  totalPaidCommission: number;
+  currency: string;
+  byCurrency?: Record<
+    string,
+    {
+      currency: string;
+      eligiblePayments: number;
+      approvedUnpaidCommission: number;
+      paidCommission: number;
+    }
+  >;
+}
+
+export interface AdminReferralsResponse {
+  ok: boolean;
+  summary: AdminReferralsSummary;
+  referrals: AdminReferralItem[];
+}
+
+export interface AdminReferralUpdatePayload {
+  action: 'approve' | 'reject' | 'mark_paid';
+  eligiblePaymentAmount?: number;
+  currency?: string;
+  payoutReference?: string;
+  adminNotes?: string;
+}
+
+export interface AdminReferralUpdateResponse {
+  ok: boolean;
+  referral: AdminReferralItem;
+  message: string;
+}
+
+export async function trackReferralCode(code: string): Promise<ReferralTrackResponse> {
+  return api<ReferralTrackResponse>('/api/referrals/track', {
+    method: 'POST',
+    body: JSON.stringify({ code }),
+  });
+}
+
+export async function fetchMyReferrals(): Promise<MyReferralsResponse> {
+  return api<MyReferralsResponse>('/api/referrals/me');
+}
+
+export async function fetchAdminReferrals(params: { q?: string; status?: 'all' | ReferralStatus } = {}): Promise<AdminReferralsResponse> {
+  const query = new URLSearchParams();
+  if (params.q) query.set('q', params.q);
+  if (params.status && params.status !== 'all') query.set('status', params.status);
+  const qs = query.toString();
+  return api<AdminReferralsResponse>(`/api/admin/referrals${qs ? `?${qs}` : ''}`);
+}
+
+export async function updateAdminReferral(
+  referralId: string,
+  payload: AdminReferralUpdatePayload
+): Promise<AdminReferralUpdateResponse> {
+  return api<AdminReferralUpdateResponse>(`/api/admin/referrals/${encodeURIComponent(referralId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+

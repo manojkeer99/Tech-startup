@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { TcMonogram, IconArrow, IconShield } from '@/components/icons';
 import { Button, Field, Input } from '@/components/ui';
 import { GoogleSignInButton } from '@/components/google-sign-in';
+import { TurnstileWidget, type TurnstileConfigState } from '@/components/turnstile-widget';
 import { useToast } from '@/components/toast';
 import { useI18n } from '@/lib/i18n';
 import { store } from '@/lib/store';
@@ -17,28 +18,67 @@ export function LoginPage({ navigate, isAdminLogin = false }: LoginPageProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const [turnstileResetKey, setTurnstileResetKey] = useState(0);
+  const [turnstileConfig, setTurnstileConfig] = useState<TurnstileConfigState>({
+    enabled: false,
+    required: false,
+    misconfigured: false,
+    mode: 'development-bypass',
+  });
+
+  // Redirect already-authenticated users so visiting /login doesn't require re-signing in
+  useEffect(() => {
+    let mounted = true;
+    const redirectIfAuthenticated = async () => {
+      const user = await store.checkSession();
+      if (!mounted || !user) return;
+      if (isAdminLogin) {
+        if (user.role === 'admin') {
+          navigate('/admin');
+        }
+      } else {
+        navigate(user.role === 'admin' ? '/admin' : '/dashboard');
+      }
+    };
+    redirectIfAuthenticated();
+    return () => {
+      mounted = false;
+    };
+  }, [isAdminLogin, navigate]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (turnstileConfig.misconfigured) {
+      return push('error', 'Security verification is misconfigured on the server.');
+    }
+    if (turnstileConfig.required && !turnstileToken) {
+      return push('error', 'Please complete the Cloudflare Turnstile security check.');
+    }
+
     setBusy(true);
     try {
-      const res = await store.login(email, password);
+      const res = await store.login(email, password, turnstileToken);
       if (res.success && res.user) {
-        push('success', `Welcome back, ${res.user.name.split(' ')[0]}.`);
         if (isAdminLogin && res.user.role !== 'admin') {
-          push('error', "That account does not have administrator privileges.");
-          store.logout();
+          push('error', 'That account does not have administrator privileges. Redirecting to Client Dashboard.');
+          navigate('/dashboard');
           return;
         }
+        push('success', `Welcome back, ${res.user.name.split(' ')[0]}.`);
         if (res.user.role === 'admin') {
           navigate('/admin');
         } else {
           navigate('/dashboard');
         }
       } else {
+        setTurnstileToken(null);
+        setTurnstileResetKey((k) => k + 1);
         push('error', res.error || 'Invalid email or password.');
       }
     } catch {
+      setTurnstileToken(null);
+      setTurnstileResetKey((k) => k + 1);
       push('error', 'Login encountered an unexpected error.');
     } finally {
       setBusy(false);
@@ -84,10 +124,15 @@ export function LoginPage({ navigate, isAdminLogin = false }: LoginPageProps) {
             : t('loginSubtitle')}
         </p>
 
-        {/* Google OAuth (Client flow) */}
+        {/* Google OAuth */}
         {!isAdminLogin && (
-          <div className="mt-6 space-y-4">
-            <GoogleSignInButton onSuccess={() => navigate('/dashboard')} />
+          <div className="mt-6 w-full space-y-4">
+            <GoogleSignInButton
+              onSuccess={() => {
+                const user = store.getSessionUser();
+                navigate(user?.role === 'admin' ? '/admin' : '/dashboard');
+              }}
+            />
             <div className="flex items-center gap-3 text-xs text-[var(--color-faint)]" aria-hidden="true">
               <span className="h-px flex-1 bg-[var(--color-line)]" />
               <span>or log in with credentials</span>
@@ -119,7 +164,20 @@ export function LoginPage({ navigate, isAdminLogin = false }: LoginPageProps) {
             />
           </Field>
 
-          <Button type="submit" size="lg" loading={busy} className="w-full mt-2">
+          <TurnstileWidget
+            action="login"
+            resetKey={turnstileResetKey}
+            onVerify={setTurnstileToken}
+            onConfigChange={setTurnstileConfig}
+          />
+
+          <Button
+            type="submit"
+            size="lg"
+            loading={busy}
+            disabled={busy || turnstileConfig.misconfigured || (turnstileConfig.required && !turnstileToken)}
+            className="w-full mt-2"
+          >
             <span>{t('navLogin')}</span>
             {!busy && <IconArrow className="h-4 w-4" />}
           </Button>

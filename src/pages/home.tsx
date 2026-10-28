@@ -150,7 +150,7 @@ export function HomePage({ navigate, initialSection }: HomePageProps) {
               <div className="mt-10 sm:mt-14 grid max-w-lg grid-cols-3 gap-2.5 sm:gap-6 border-t border-[var(--color-line)] pt-6 sm:pt-7">
                 <div>
                   <p className="font-display text-xl sm:text-3xl font-extrabold text-[var(--color-ink)]">
-                    <CountUp to={7} suffix="" />
+                    <CountUp to={SERVICE_DEFINITIONS.length} suffix="" />
                   </p>
                   <p className="mt-1 font-mono text-[10px] sm:text-[11px] uppercase tracking-wider text-[var(--color-faint)] truncate">
                     {t('heroStat1Label')}
@@ -408,9 +408,6 @@ export function HomePage({ navigate, initialSection }: HomePageProps) {
                   <span className="block font-display text-sm sm:text-base font-bold text-[var(--color-ink)] truncate">
                     {t('joinDiscord')}
                   </span>
-                  <span className="font-mono text-[10px] sm:text-[11px] text-[#5865F2] truncate block">
-                    discord.gg/gyTKYGNZT9
-                  </span>
                 </span>
               </a>
 
@@ -426,9 +423,6 @@ export function HomePage({ navigate, initialSection }: HomePageProps) {
                 <span className="text-left min-w-0">
                   <span className="block font-display text-sm sm:text-base font-bold text-[var(--color-ink)] truncate">
                     {t('followInstagram')}
-                  </span>
-                  <span className="font-mono text-[10px] sm:text-[11px] text-rose-400 truncate block">
-                    @thecreators.pvt.ltd
                   </span>
                 </span>
               </a>

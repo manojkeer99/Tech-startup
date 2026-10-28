@@ -30,11 +30,13 @@ import {
   IconLogout,
   IconCpu,
   IconChart,
-  IconMail,
+  IconSpark,
+  IconGlobe,
 } from '@/components/icons';
 import { formatDate, timeAgo } from '@/lib/utils';
-import type { Project, ProjectStatus, PublicUser, AuditLog } from '@/types';
+import type { Project, ProjectStatus, PublicUser, AuditLog, AdminReferralItem, ReferralStatus } from '@/types';
 import { api, ApiError } from '@/lib/api';
+import { store } from '@/lib/store';
 import {
   fetchAdminStats,
   fetchAdminUsers,
@@ -45,12 +47,13 @@ import {
   updateAdminProject,
   deleteAdminProject,
   fetchAdminLogs,
-  fetchAdminContactInquiries,
   fetchAdminSystemStatus,
+  fetchAdminReferrals,
+  updateAdminReferral,
   type AdminStats,
   type AdminUserItem,
   type AdminSystemInfo,
-  type AdminContactInquiry,
+  type AdminReferralsSummary,
   type PaginationMeta,
 } from '@/lib/admin-api';
 
@@ -59,7 +62,7 @@ interface AdminPageProps {
   initialTab?: string;
 }
 
-type TabKey = 'overview' | 'users' | 'projects' | 'inquiries' | 'logs' | 'system';
+type TabKey = 'overview' | 'users' | 'projects' | 'referrals' | 'logs' | 'system';
 
 export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps) {
   const { push } = useToast();
@@ -67,7 +70,7 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
 
   // Active navigation tab
   const [tab, setTab] = useState<TabKey>(() => {
-    const validTabs: TabKey[] = ['overview', 'users', 'projects', 'inquiries', 'logs', 'system'];
+    const validTabs: TabKey[] = ['overview', 'users', 'projects', 'referrals', 'logs', 'system'];
     return validTabs.includes(initialTab as TabKey) ? (initialTab as TabKey) : 'overview';
   });
 
@@ -125,11 +128,7 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
 
   // Handle Logout
   const handleLogout = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
-    } catch {
-      // Ignore
-    }
+    await store.logout();
     navigate('/admin/login');
   };
 
@@ -241,28 +240,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
   }, [projectSearch, projectStatusFilter, projectsPagination.limit]);
 
   /* -------------------------------------------------------------------------- */
-  /*                         CONTACT INQUIRIES STATE                           */
-  /* -------------------------------------------------------------------------- */
-  const [inquiries, setInquiries] = useState<AdminContactInquiry[]>([]);
-  const [inquiriesLoading, setInquiriesLoading] = useState(false);
-  const [inquiriesError, setInquiriesError] = useState<string | null>(null);
-  const [inquiriesTotal, setInquiriesTotal] = useState(0);
-
-  const loadInquiries = useCallback(async () => {
-    setInquiriesLoading(true);
-    setInquiriesError(null);
-    try {
-      const res = await fetchAdminContactInquiries(1, 100);
-      setInquiries(res.inquiries);
-      setInquiriesTotal(res.pagination.total);
-    } catch (err: unknown) {
-      setInquiriesError(err instanceof Error ? err.message : 'Failed to load contact inquiries.');
-    } finally {
-      setInquiriesLoading(false);
-    }
-  }, []);
-
-  /* -------------------------------------------------------------------------- */
   /*                          TAB 4: ACTIVITY LOGS STATE                        */
   /* -------------------------------------------------------------------------- */
   const [logs, setLogs] = useState<AuditLog[]>([]);
@@ -305,6 +282,50 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
     }
   }, []);
 
+  /* -------------------------------------------------------------------------- */
+  /*                           TAB 6: REFERRALS STATE                           */
+  /* -------------------------------------------------------------------------- */
+  const [referrals, setReferrals] = useState<AdminReferralItem[]>([]);
+  const [referralsSummary, setReferralsSummary] = useState<AdminReferralsSummary | null>(null);
+  const [referralsLoading, setReferralsLoading] = useState(false);
+  const [referralsError, setReferralsError] = useState<string | null>(null);
+  const [referralSearch, setReferralSearch] = useState('');
+  const [referralStatusFilter, setReferralStatusFilter] = useState<'all' | ReferralStatus>('all');
+
+  // Modals for Referral Management
+  const [approveReferralModal, setApproveReferralModal] = useState<AdminReferralItem | null>(null);
+  const [eligiblePaymentInput, setEligiblePaymentInput] = useState('');
+  const [paymentCurrencyInput, setPaymentCurrencyInput] = useState('INR');
+  const [approveNotesInput, setApproveNotesInput] = useState('');
+  const [payReferralModal, setPayReferralModal] = useState<AdminReferralItem | null>(null);
+  const [payoutReferenceInput, setPayoutReferenceInput] = useState('');
+  const [payNotesInput, setPayNotesInput] = useState('');
+  const [rejectReferralModal, setRejectReferralModal] = useState<AdminReferralItem | null>(null);
+  const [rejectNotesInput, setRejectNotesInput] = useState('');
+  const [referralActionLoading, setReferralActionLoading] = useState(false);
+
+  const formatReferralMoney = (amount: number, currency = 'INR') => {
+    const code = (currency || 'INR').toUpperCase();
+    return `${code} ${(Number(amount) || 0).toFixed(2)}`;
+  };
+
+  const loadReferrals = useCallback(async () => {
+    setReferralsLoading(true);
+    setReferralsError(null);
+    try {
+      const res = await fetchAdminReferrals({
+        q: referralSearch.trim(),
+        status: referralStatusFilter,
+      });
+      setReferrals(res.referrals);
+      setReferralsSummary(res.summary);
+    } catch (err: unknown) {
+      setReferralsError(err instanceof Error ? err.message : 'Failed to load referrals from database.');
+    } finally {
+      setReferralsLoading(false);
+    }
+  }, [referralSearch, referralStatusFilter]);
+
   // Fetch tab data whenever active tab or verified admin changes
   useEffect(() => {
     if (!currentUser || currentUser.role !== 'admin') return;
@@ -315,14 +336,14 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
       loadUsers(1);
     } else if (tab === 'projects') {
       loadProjects(1);
-    } else if (tab === 'inquiries') {
-      loadInquiries();
+    } else if (tab === 'referrals') {
+      loadReferrals();
     } else if (tab === 'logs') {
       loadLogs();
     } else if (tab === 'system') {
       loadSystemInfo();
     }
-  }, [tab, currentUser, loadStats, loadUsers, loadProjects, loadInquiries, loadLogs, loadSystemInfo]);
+  }, [tab, currentUser, loadStats, loadUsers, loadProjects, loadReferrals, loadLogs, loadSystemInfo]);
 
   /* -------------------------------------------------------------------------- */
   /*                              ACTION HANDLERS                               */
@@ -425,6 +446,78 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
     }
   };
 
+  // Verify & Approve 10% Referral Commission
+  const handleExecuteApproveReferral = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!approveReferralModal) return;
+    const numPayment = Number(eligiblePaymentInput);
+    if (!Number.isFinite(numPayment) || numPayment <= 0) {
+      return push('error', 'Please enter a valid positive eligible payment amount actually received.');
+    }
+    setReferralActionLoading(true);
+    try {
+      const res = await updateAdminReferral(approveReferralModal.id, {
+        action: 'approve',
+        eligiblePaymentAmount: numPayment,
+        currency: paymentCurrencyInput,
+        adminNotes: approveNotesInput.trim() || undefined,
+      });
+      push('success', res.message);
+      setApproveReferralModal(null);
+      setEligiblePaymentInput('');
+      setApproveNotesInput('');
+      loadReferrals();
+    } catch (err: unknown) {
+      push('error', err instanceof Error ? err.message : 'Failed to approve referral commission.');
+    } finally {
+      setReferralActionLoading(false);
+    }
+  };
+
+  // Mark Approved Commission as Paid
+  const handleExecutePayReferral = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!payReferralModal) return;
+    setReferralActionLoading(true);
+    try {
+      const res = await updateAdminReferral(payReferralModal.id, {
+        action: 'mark_paid',
+        payoutReference: payoutReferenceInput.trim() || undefined,
+        adminNotes: payNotesInput.trim() || undefined,
+      });
+      push('success', res.message);
+      setPayReferralModal(null);
+      setPayoutReferenceInput('');
+      setPayNotesInput('');
+      loadReferrals();
+    } catch (err: unknown) {
+      push('error', err instanceof Error ? err.message : 'Failed to mark commission as paid.');
+    } finally {
+      setReferralActionLoading(false);
+    }
+  };
+
+  // Reject Referral
+  const handleExecuteRejectReferral = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!rejectReferralModal) return;
+    setReferralActionLoading(true);
+    try {
+      const res = await updateAdminReferral(rejectReferralModal.id, {
+        action: 'reject',
+        adminNotes: rejectNotesInput.trim() || undefined,
+      });
+      push('success', res.message);
+      setRejectReferralModal(null);
+      setRejectNotesInput('');
+      loadReferrals();
+    } catch (err: unknown) {
+      push('error', err instanceof Error ? err.message : 'Failed to reject referral.');
+    } finally {
+      setReferralActionLoading(false);
+    }
+  };
+
   // Copy helper
   const handleCopy = (text: string, label = 'Copied') => {
     navigator.clipboard.writeText(text);
@@ -498,8 +591,13 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
       {/* Top Admin Bar */}
       <header className="sticky top-0 z-40 border-b border-[var(--color-line)] bg-[var(--color-surface)]/90 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3 sm:px-6">
-          <div className="flex items-center gap-3">
-            <TcMonogram className="h-9 w-9" />
+          <button
+            type="button"
+            onClick={() => navigate('/')}
+            className="flex items-center gap-3 text-left cursor-pointer group"
+            aria-label="THE CREATORS Home"
+          >
+            <TcMonogram className="h-9 w-9 transition-transform duration-300 group-hover:scale-105" />
             <div>
               <div className="flex items-center gap-2">
                 <span className="font-display text-base font-bold tracking-tight text-[var(--color-ink)]">THE CREATORS</span>
@@ -512,9 +610,19 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                 PostgreSQL Neon Connected
               </div>
             </div>
-          </div>
+          </button>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
+            <Button variant="outline" size="sm" onClick={() => navigate('/')}>
+              <IconGlobe className="h-4 w-4" />
+              <span className="hidden md:inline">Website</span>
+            </Button>
+
+            <Button variant="outline" size="sm" onClick={() => navigate('/dashboard')}>
+              <IconFolder className="h-4 w-4" />
+              <span className="hidden md:inline">Dashboard</span>
+            </Button>
+
             {/* Admin identity indicator */}
             <div className="hidden sm:flex items-center gap-2.5 rounded-xl border border-[var(--color-line)] bg-[var(--color-raise)]/60 px-3 py-1.5 text-xs">
               {currentUser.avatarUrl ? (
@@ -587,17 +695,19 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
             </button>
 
             <button
-              onClick={() => handleTabChange('inquiries')}
+              onClick={() => handleTabChange('referrals')}
               className={`flex items-center gap-2 rounded-lg px-3.5 py-2 transition whitespace-nowrap cursor-pointer ${
-                tab === 'inquiries'
+                tab === 'referrals'
                   ? 'bg-violet-600/15 text-violet-300 border border-violet-500/30'
                   : 'text-[var(--color-muted)] hover:text-[var(--color-ink)] hover:bg-[var(--color-raise)]'
               }`}
             >
-              <IconMail className="h-4 w-4 shrink-0" />
-              Contact Inquiries
-              {inquiriesTotal > 0 && (
-                <span className="rounded-full bg-violet-500/15 px-2 py-0.5 text-[10px] font-mono text-violet-300">{inquiriesTotal}</span>
+              <IconSpark className="h-4 w-4 shrink-0" />
+              Referrals
+              {referralsSummary?.pendingCount !== undefined && referralsSummary.pendingCount > 0 && (
+                <span className="rounded-full bg-amber-500/20 px-1.5 py-0.2 font-mono text-[10px] text-amber-300">
+                  {referralsSummary.pendingCount}
+                </span>
               )}
             </button>
 
@@ -1270,76 +1380,6 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
         )}
 
         {/* ==================================================================== */}
-        {/* CONTACT INQUIRIES                                                    */}
-        {/* ==================================================================== */}
-        {tab === 'inquiries' && (
-          <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-              <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[var(--color-ink)]">
-                  Contact Inquiries
-                </h1>
-                <p className="mt-1 text-sm text-[var(--color-muted)]">
-                  Messages submitted through the public contact form, stored in PostgreSQL.
-                </p>
-              </div>
-              <Button variant="outline" size="sm" onClick={loadInquiries} loading={inquiriesLoading}>
-                Refresh Inquiries
-              </Button>
-            </div>
-
-            {inquiriesError && (
-              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300 flex items-center justify-between gap-3">
-                <span>{inquiriesError}</span>
-                <Button variant="danger" size="sm" onClick={loadInquiries}>Retry</Button>
-              </div>
-            )}
-
-            {inquiriesLoading && inquiries.length === 0 ? (
-              <div className="py-16 text-center text-sm text-[var(--color-faint)]">
-                <Spinner className="mx-auto mb-3" /> Loading contact inquiries...
-              </div>
-            ) : inquiries.length === 0 ? (
-              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/20 p-8">
-                <EmptyState icon={<IconMail className="h-6 w-6" />} title="No Contact Inquiries Yet" body="New valid contact-form submissions will appear here after database storage is configured." />
-              </div>
-            ) : (
-              <div className="space-y-4">
-                {inquiries.map((inquiry) => (
-                  <article key={inquiry.id} className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/20 p-5 sm:p-6">
-                    <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div className="min-w-0">
-                        <h2 className="break-words font-semibold text-[var(--color-ink)]">{inquiry.subject}</h2>
-                        <p className="mt-1 text-sm text-[var(--color-muted)]">
-                          <span className="font-medium text-[var(--color-ink)]">{inquiry.name}</span>
-                          {' · '}
-                          <a className="text-violet-300 hover:underline" href={`mailto:${encodeURIComponent(inquiry.email)}`}>{inquiry.email}</a>
-                        </p>
-                      </div>
-                      <time className="shrink-0 text-xs text-[var(--color-muted)]" dateTime={inquiry.created_at}>
-                        {formatDate(inquiry.created_at)} · {timeAgo(inquiry.created_at)}
-                      </time>
-                    </div>
-                    <p className="mt-4 whitespace-pre-wrap break-words text-sm leading-7 text-[var(--color-ink)]">{inquiry.message}</p>
-                    <div className="mt-4 border-t border-[var(--color-line)] pt-3">
-                      <a
-                        href={`mailto:${encodeURIComponent(inquiry.email)}?subject=${encodeURIComponent(`Re: ${inquiry.subject}`)}`}
-                        className="inline-flex items-center gap-2 text-sm font-medium text-violet-300 hover:underline"
-                      >
-                        <IconMail className="h-4 w-4" /> Reply by email
-                      </a>
-                    </div>
-                  </article>
-                ))}
-                <p className="text-xs font-mono text-[var(--color-muted)]">
-                  Showing {inquiries.length} of {inquiriesTotal} stored inquiries (newest first).
-                </p>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* ==================================================================== */}
         {/* TAB 4: ACTIVITY LOGS                                                 */}
         {/* ==================================================================== */}
         {tab === 'logs' && (
@@ -1578,6 +1618,311 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
                 </div>
               </div>
             ) : null}
+          </div>
+        )}
+
+        {/* ==================================================================== */}
+        {/* TAB 6: REFERRALS & 10% COMMISSION MANAGEMENT                         */}
+        {/* ==================================================================== */}
+        {tab === 'referrals' && (
+          <div className="space-y-8">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+              <div>
+                <h1 className="font-display text-2xl sm:text-3xl font-bold tracking-tight text-[var(--color-ink)]">
+                  Referrals &amp; 10% Commission Verification
+                </h1>
+                <p className="mt-1 text-sm text-[var(--color-muted)]">
+                  Verify eligible client project payments received, approve 10% commissions server-side, and record commission payouts.
+                </p>
+              </div>
+              <Button variant="outline" size="sm" onClick={loadReferrals} loading={referralsLoading}>
+                Refresh Referrals
+              </Button>
+            </div>
+
+            {referralsError && (
+              <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-300 flex items-center justify-between">
+                <span>{referralsError}</span>
+                <Button variant="danger" size="sm" onClick={loadReferrals}>Retry</Button>
+              </div>
+            )}
+
+            {/* Summary KPIs */}
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/40 p-5">
+                <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">Attributed Referrals</span>
+                <div className="mt-2 font-display text-3xl font-bold text-[var(--color-ink)]">
+                  {referralsSummary?.totalAttributedProjects ?? 0}
+                </div>
+                <div className="mt-1 text-xs font-mono text-[var(--color-faint)]">
+                  Pending verification: {referralsSummary?.pendingCount ?? 0}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/40 p-5">
+                <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">Verified Client Payments</span>
+                <div className="mt-2 font-display text-2xl sm:text-3xl font-bold text-blue-400">
+                  {referralsSummary?.byCurrency && Object.keys(referralsSummary.byCurrency).length > 1
+                    ? Object.values(referralsSummary.byCurrency)
+                        .map((b) => formatReferralMoney(b.eligiblePayments, b.currency))
+                        .join(' + ')
+                    : formatReferralMoney(referralsSummary?.totalEligiblePayments ?? 0, referralsSummary?.currency || 'INR')}
+                </div>
+                <div className="mt-1 text-xs font-mono text-[var(--color-faint)]">
+                  Eligible referrals: {(referralsSummary?.approvedCount ?? 0) + (referralsSummary?.paidCount ?? 0)}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/40 p-5">
+                <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">Approved (Unpaid)</span>
+                <div className="mt-2 font-display text-2xl sm:text-3xl font-bold text-violet-300">
+                  {referralsSummary?.byCurrency && Object.keys(referralsSummary.byCurrency).length > 1
+                    ? Object.values(referralsSummary.byCurrency)
+                        .map((b) => formatReferralMoney(b.approvedUnpaidCommission, b.currency))
+                        .join(' + ')
+                    : formatReferralMoney(referralsSummary?.totalApprovedUnpaidCommission ?? 0, referralsSummary?.currency || 'INR')}
+                </div>
+                <div className="mt-1 text-xs font-mono text-[var(--color-faint)]">
+                  {referralsSummary?.approvedCount ?? 0} awaiting payout
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/40 p-5">
+                <span className="font-mono text-xs uppercase tracking-wider text-[var(--color-muted)]">Total Paid Commission</span>
+                <div className="mt-2 font-display text-2xl sm:text-3xl font-bold text-emerald-400">
+                  {referralsSummary?.byCurrency && Object.keys(referralsSummary.byCurrency).length > 1
+                    ? Object.values(referralsSummary.byCurrency)
+                        .map((b) => formatReferralMoney(b.paidCommission, b.currency))
+                        .join(' + ')
+                    : formatReferralMoney(referralsSummary?.totalPaidCommission ?? 0, referralsSummary?.currency || 'INR')}
+                </div>
+                <div className="mt-1 text-xs font-mono text-[var(--color-faint)]">
+                  {referralsSummary?.paidCount ?? 0} completed payouts
+                </div>
+              </div>
+            </div>
+
+            {/* Search & Status Filter */}
+            <div className="flex flex-col sm:flex-row gap-3 rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/30 p-4">
+              <div className="relative flex-1">
+                <IconSearch className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-[var(--color-faint)]" />
+                <Input
+                  placeholder="Search by project ID, referral code, referrer, or client email..."
+                  value={referralSearch}
+                  onChange={(e) => setReferralSearch(e.target.value)}
+                  className="pl-10"
+                />
+              </div>
+              <div className="w-full sm:w-48">
+                <Select
+                  value={referralStatusFilter}
+                  onChange={(e) => setReferralStatusFilter(e.target.value as 'all' | ReferralStatus)}
+                >
+                  <option value="all">All Statuses</option>
+                  <option value="pending">Pending Verification</option>
+                  <option value="approved">Approved (Unpaid)</option>
+                  <option value="paid">Paid</option>
+                  <option value="rejected">Rejected</option>
+                </Select>
+              </div>
+              <Button variant="primary" size="sm" onClick={loadReferrals}>
+                Apply Filter
+              </Button>
+            </div>
+
+            {/* Referrals Table */}
+            {referralsLoading ? (
+              <div className="flex items-center justify-center py-16 text-sm font-mono text-[var(--color-muted)] gap-3">
+                <Spinner className="h-4 w-4 text-violet-400" />
+                Loading attributed referrals...
+              </div>
+            ) : referrals.length === 0 ? (
+              <EmptyState
+                icon={<IconSpark className="h-6 w-6" />}
+                title="No referral records match your filter"
+                body="Attributed client project requests will appear here automatically when submitted via a valid referral link."
+              />
+            ) : (
+              <div className="overflow-x-auto rounded-2xl border border-[var(--color-line)] bg-[var(--color-raise)]/30">
+                <table className="w-full text-left border-collapse text-xs">
+                  <thead>
+                    <tr className="border-b border-[var(--color-line)] bg-[var(--color-abyss)]/70 font-mono text-[10px] uppercase tracking-wider text-[var(--color-faint)]">
+                      <th className="py-3.5 px-4">Project &amp; Status</th>
+                      <th className="py-3.5 px-4">Referrer</th>
+                      <th className="py-3.5 px-4">Referred Client</th>
+                      <th className="py-3.5 px-4">Eligible Payment</th>
+                      <th className="py-3.5 px-4">10% Commission</th>
+                      <th className="py-3.5 px-4">Commission Status</th>
+                      <th className="py-3.5 px-4 text-right">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[var(--color-line)]/60">
+                    {referrals.map((r) => (
+                      <tr key={r.id} className="hover:bg-[var(--color-raise)]/50 transition">
+                        <td className="py-3.5 px-4">
+                          <div className="font-mono font-bold text-violet-300">{r.projectPublicId}</div>
+                          <div className="font-medium text-[var(--color-ink)] truncate max-w-[190px]">{r.projectTitle}</div>
+                          <div className="mt-1">
+                            <StatusBadge status={r.projectStatus} />
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          <div className="font-medium text-[var(--color-ink)]">{r.referrerName}</div>
+                          <div className="font-mono text-[11px] text-[var(--color-faint)]">{r.referrerEmail}</div>
+                          <span className="mt-1 inline-block rounded bg-violet-500/15 px-1.5 py-0.5 font-mono text-[10px] text-violet-300">
+                            {r.referralCode}
+                          </span>
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          <div className="font-medium text-[var(--color-ink)]">{r.clientName}</div>
+                          <div className="font-mono text-[11px] text-[var(--color-faint)]">{r.clientEmail}</div>
+                          <div className="font-mono text-[10px] text-[var(--color-muted)] mt-0.5">
+                            Submitted {formatDate(r.createdAt)}
+                          </div>
+                        </td>
+
+                        <td className="py-3.5 px-4 font-mono">
+                          {r.eligiblePaymentAmount > 0 ? (
+                            <span className="font-bold text-[var(--color-ink)]">
+                              {formatReferralMoney(r.eligiblePaymentAmount, r.currency)}
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-faint)]">Unverified</span>
+                          )}
+                          {r.projectBudget && (
+                            <div className="text-[10px] text-[var(--color-faint)] mt-0.5">
+                              Brief budget: {r.projectBudget}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 font-mono">
+                          {r.commissionAmount > 0 ? (
+                            <span className="font-bold text-emerald-400">
+                              {formatReferralMoney(r.commissionAmount, r.currency)}
+                            </span>
+                          ) : (
+                            <span className="text-[var(--color-faint)]">—</span>
+                          )}
+                          <div className="text-[10px] text-[var(--color-faint)]">Rate: 10%</div>
+                        </td>
+
+                        <td className="py-3.5 px-4">
+                          <span
+                            className={`inline-flex items-center rounded-md px-2 py-0.5 font-mono text-[10px] font-semibold uppercase ${
+                              r.status === 'paid'
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
+                                : r.status === 'approved'
+                                  ? 'bg-violet-500/20 text-violet-300 border border-violet-500/30'
+                                  : r.status === 'rejected'
+                                    ? 'bg-rose-500/20 text-rose-300 border border-rose-500/30'
+                                    : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                            }`}
+                          >
+                            {r.status}
+                          </span>
+                          {r.payoutReference && (
+                            <div className="font-mono text-[10px] text-emerald-300 mt-1">
+                              Ref: {r.payoutReference}
+                            </div>
+                          )}
+                          {r.paidAt && (
+                            <div className="font-mono text-[10px] text-[var(--color-faint)]">
+                              Paid: {formatDate(r.paidAt)}
+                            </div>
+                          )}
+                          {r.adminNotes && (
+                            <div className="text-[10px] text-[var(--color-muted)] mt-1 max-w-[180px] truncate" title={r.adminNotes}>
+                              Note: {r.adminNotes}
+                            </div>
+                          )}
+                        </td>
+
+                        <td className="py-3.5 px-4 text-right">
+                          <div className="flex flex-wrap items-center justify-end gap-1.5">
+                            {r.status === 'pending' && (
+                              <>
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  onClick={() => {
+                                    setApproveReferralModal(r);
+                                    setEligiblePaymentInput('');
+                                    setPaymentCurrencyInput(r.currency || 'INR');
+                                    setApproveNotesInput(r.adminNotes || '');
+                                  }}
+                                >
+                                  Verify &amp; Approve
+                                </Button>
+                                <Button
+                                  variant="danger"
+                                  size="sm"
+                                  onClick={() => {
+                                    setRejectReferralModal(r);
+                                    setRejectNotesInput(r.adminNotes || '');
+                                  }}
+                                >
+                                  Reject
+                                </Button>
+                              </>
+                            )}
+
+                            {r.status === 'approved' && (
+                              <>
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  onClick={() => {
+                                    setPayReferralModal(r);
+                                    setPayoutReferenceInput('');
+                                    setPayNotesInput(r.adminNotes || '');
+                                  }}
+                                >
+                                  Mark Paid
+                                </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => {
+                                    setRejectReferralModal(r);
+                                    setRejectNotesInput(r.adminNotes || '');
+                                  }}
+                                >
+                                  Reject
+                                </Button>
+                              </>
+                            )}
+
+                            {r.status === 'rejected' && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => {
+                                  setApproveReferralModal(r);
+                                  setEligiblePaymentInput('');
+                                  setPaymentCurrencyInput(r.currency || 'INR');
+                                  setApproveNotesInput(r.adminNotes || '');
+                                }}
+                              >
+                                Re-verify &amp; Approve
+                              </Button>
+                            )}
+
+                            {r.status === 'paid' && (
+                              <span className="font-mono text-[11px] text-emerald-400 px-2">
+                                Completed
+                              </span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
       </main>
@@ -1985,6 +2330,167 @@ export function AdminPage({ navigate, initialTab = 'overview' }: AdminPageProps)
           </div>
         )}
       </Modal>
+
+      {/* 9. Verify & Approve 10% Referral Commission Modal */}
+      <Modal
+        open={Boolean(approveReferralModal)}
+        onClose={() => setApproveReferralModal(null)}
+        title="Verify Eligible Payment & Approve 10% Commission"
+      >
+        {approveReferralModal && (
+          <form onSubmit={handleExecuteApproveReferral} className="space-y-4">
+            <p className="text-sm text-[var(--color-muted)] leading-relaxed">
+              Enter the actual eligible project payment received for{' '}
+              <strong className="text-[var(--color-ink)]">{approveReferralModal.projectPublicId}</strong> ({approveReferralModal.projectTitle}).
+              The server will automatically calculate and lock the <strong className="text-emerald-400">10% commission</strong> for referrer{' '}
+              <strong className="text-[var(--color-ink)]">{approveReferralModal.referrerName}</strong> ({approveReferralModal.referralCode}).
+            </p>
+
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="sm:col-span-1">
+                <Field label="Payment Currency">
+                  <Select
+                    value={paymentCurrencyInput}
+                    onChange={(e) => setPaymentCurrencyInput(e.target.value)}
+                  >
+                    <option value="INR">INR (₹)</option>
+                    <option value="USD">USD ($)</option>
+                    <option value="EUR">EUR (€)</option>
+                    <option value="GBP">GBP (£)</option>
+                    <option value="AED">AED</option>
+                    <option value="AUD">AUD</option>
+                    <option value="CAD">CAD</option>
+                    <option value="SGD">SGD</option>
+                  </Select>
+                </Field>
+              </div>
+              <div className="sm:col-span-2">
+                <Field label={`Eligible Payment Received (${paymentCurrencyInput})`} hint="Actual payment currency — no conversion">
+                  <Input
+                    type="number"
+                    step="0.01"
+                    min="0.01"
+                    required
+                    placeholder="e.g. 25000.00"
+                    value={eligiblePaymentInput}
+                    onChange={(e) => setEligiblePaymentInput(e.target.value)}
+                  />
+                </Field>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-3.5 flex items-center justify-between font-mono text-xs">
+              <span className="text-emerald-300">Calculated 10% Commission (Same Currency):</span>
+              <span className="text-base font-bold text-emerald-400">
+                {paymentCurrencyInput}{' '}
+                {Number.isFinite(Number(eligiblePaymentInput)) && Number(eligiblePaymentInput) > 0
+                  ? (Math.round(Number(eligiblePaymentInput) * 0.1 * 100) / 100).toFixed(2)
+                  : '0.00'}
+              </span>
+            </div>
+
+            <Field label="Verification Notes (Optional)">
+              <Textarea
+                value={approveNotesInput}
+                onChange={(e) => setApproveNotesInput(e.target.value)}
+                placeholder="e.g. Verified client invoice #INV-2026-104 settled in full."
+                className="min-h-[70px]"
+              />
+            </Field>
+
+            <div className="flex justify-end gap-2 pt-4 border-t border-[var(--color-line)]">
+              <Button variant="ghost" size="sm" type="button" onClick={() => setApproveReferralModal(null)}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" type="submit" loading={referralActionLoading}>
+                Verify &amp; Approve 10% Commission
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      {/* 10. Mark Approved Commission as Paid Modal */}
+      <Modal
+        open={Boolean(payReferralModal)}
+        onClose={() => setPayReferralModal(null)}
+        title="Record Referral Commission Payout"
+      >
+        {payReferralModal && (
+          <form onSubmit={handleExecutePayReferral} className="space-y-4">
+            <p className="text-sm text-[var(--color-muted)] leading-relaxed">
+              Mark the approved 10% commission of{' '}
+              <strong className="text-emerald-400 font-mono">
+                {formatReferralMoney(payReferralModal.commissionAmount, payReferralModal.currency)}
+              </strong>{' '}
+              for <strong className="text-[var(--color-ink)]">{payReferralModal.referrerName}</strong> ({payReferralModal.referrerEmail}) as paid.
+            </p>
+
+            <Field label="Payout Reference / Transaction ID" hint="Recorded in audit log & referrer dashboard">
+              <Input
+                type="text"
+                required
+                placeholder="e.g. WIRE-2026-88412 or UPI-REF-9910"
+                value={payoutReferenceInput}
+                onChange={(e) => setPayoutReferenceInput(e.target.value)}
+              />
+            </Field>
+
+            <Field label="Admin Notes (Optional)">
+              <Textarea
+                value={payNotesInput}
+                onChange={(e) => setPayNotesInput(e.target.value)}
+                placeholder="Optional payout disbursement notes..."
+                className="min-h-[65px]"
+              />
+            </Field>
+
+            <div className="flex justify-end gap-2 pt-4 border-t border-[var(--color-line)]">
+              <Button variant="ghost" size="sm" type="button" onClick={() => setPayReferralModal(null)}>
+                Cancel
+              </Button>
+              <Button variant="primary" size="sm" type="submit" loading={referralActionLoading}>
+                Confirm Payout Recorded
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      {/* 11. Reject Referral Modal */}
+      <Modal
+        open={Boolean(rejectReferralModal)}
+        onClose={() => setRejectReferralModal(null)}
+        title="Reject Referral Attribution / Commission"
+      >
+        {rejectReferralModal && (
+          <form onSubmit={handleExecuteRejectReferral} className="space-y-4">
+            <p className="text-sm text-[var(--color-muted)] leading-relaxed">
+              Mark referral for project{' '}
+              <strong className="text-[var(--color-ink)]">{rejectReferralModal.projectPublicId}</strong> as rejected (e.g. cancelled project, unpaid invoice, or ineligible referral).
+            </p>
+
+            <Field label="Rejection Reason / Notes">
+              <Textarea
+                value={rejectNotesInput}
+                onChange={(e) => setRejectNotesInput(e.target.value)}
+                placeholder="e.g. Project inquiry was cancelled without payment."
+                className="min-h-[70px]"
+              />
+            </Field>
+
+            <div className="flex justify-end gap-2 pt-4 border-t border-[var(--color-line)]">
+              <Button variant="ghost" size="sm" type="button" onClick={() => setRejectReferralModal(null)}>
+                Cancel
+              </Button>
+              <Button variant="danger" size="sm" type="submit" loading={referralActionLoading}>
+                Confirm Rejection
+              </Button>
+            </div>
+          </form>
+        )}
+      </Modal>
     </div>
   );
 }
+
