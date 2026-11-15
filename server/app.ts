@@ -3,6 +3,7 @@ import cors from 'cors';
 import cookieParser from 'cookie-parser';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
+import nodemailer from 'nodemailer';
 import path from 'path';
 import fs from 'fs';
 import { OAuth2Client } from 'google-auth-library';
@@ -1509,7 +1510,67 @@ app.get('/api/auth/me', async (req: Request, res: Response) => {
   return res.json({ ok: true, user: publicUser });
 });
 
-// Password recovery endpoints (single-use token hash stored in PostgreSQL password_resets table)
+function getPasswordResetMailConfig(): {
+  host: string;
+  port: number;
+  secure: boolean;
+  user: string;
+  pass: string;
+  from: string;
+  appUrl: string;
+} | null {
+  const host = process.env.SMTP_HOST?.trim();
+  const port = Number(process.env.SMTP_PORT || 587);
+  const user = process.env.SMTP_USER?.trim();
+  const pass = process.env.SMTP_PASS;
+  const from = process.env.SMTP_FROM?.trim();
+  const secureSetting = process.env.SMTP_SECURE?.trim().toLowerCase();
+  const rawAppUrl =
+    process.env.FRONTEND_URL?.trim() ||
+    process.env.APP_URL?.trim() ||
+    (process.env.NODE_ENV === 'production' ? '' : 'http://localhost:3000');
+
+  if (
+    !host ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65535 ||
+    !user ||
+    !pass ||
+    !from ||
+    (secureSetting && secureSetting !== 'true' && secureSetting !== 'false') ||
+    !rawAppUrl
+  ) {
+    return null;
+  }
+
+  let appUrl: URL;
+  try {
+    appUrl = new URL(rawAppUrl);
+  } catch {
+    return null;
+  }
+
+  const isLocalHttp =
+    process.env.NODE_ENV !== 'production' &&
+    appUrl.protocol === 'http:' &&
+    ['localhost', '127.0.0.1'].includes(appUrl.hostname);
+  if (appUrl.protocol !== 'https:' && !isLocalHttp) {
+    return null;
+  }
+
+  return {
+    host,
+    port,
+    secure: secureSetting ? secureSetting === 'true' : port === 465,
+    user,
+    pass,
+    from,
+    appUrl: appUrl.origin,
+  };
+}
+
+// Password recovery uses a one-hour, single-use token stored as a hash.
 app.post('/api/auth/forgot', async (req: Request, res: Response) => {
   if (!(await verifyTurnstileToken(req, res, 'forgot_password'))) {
     return;
@@ -1522,31 +1583,97 @@ app.post('/api/auth/forgot', async (req: Request, res: Response) => {
     return res.status(400).json({ error: 'Valid email address is required.' });
   }
 
+  const mailConfig = getPasswordResetMailConfig();
+  if (!mailConfig) {
+    return res.status(503).json({ error: 'Password reset email is not configured on the server.' });
+  }
+  if (!isDbConfigured || !pool) {
+    return res.status(503).json({ error: 'Password reset is unavailable because the database is not configured.' });
+  }
+
+  let userId: string;
+  try {
+    const userResult = await query<{ id: string }>(
+      'SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1',
+      [cleanEmail]
+    );
+    if (userResult.rows.length === 0) {
+      return res.json({
+        ok: true,
+        message: 'If that email address is registered, password reset instructions have been sent.',
+      });
+    }
+    userId = userResult.rows[0].id;
+  } catch (err) {
+    console.error('[Password Reset Lookup Error]:', err instanceof Error ? err.message : String(err));
+    return res.status(500).json({ error: 'Unable to process the password reset request right now.' });
+  }
+
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
   const resetId = `rst_${Date.now()}_${crypto.randomBytes(8).toString('hex')}`;
   const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
 
-  if (isDbConfigured) {
-    try {
-      const uRes = await query<{ id: string }>('SELECT id FROM users WHERE LOWER(email) = $1 LIMIT 1', [cleanEmail]);
-      if (uRes.rows.length > 0) {
-        const userId = uRes.rows[0].id;
-        await query(
-          'INSERT INTO password_resets (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
-          [resetId, userId, tokenHash, expiresAt.toISOString()]
-        );
-        logAudit(cleanEmail, 'auth.password_reset_request', 'Single-use reset token created');
-      }
-    } catch (err) {
-      console.warn('[Password Reset Warning]:', err);
-    }
+  try {
+    await query(
+      'INSERT INTO password_resets (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)',
+      [resetId, userId, tokenHash, expiresAt.toISOString()]
+    );
+  } catch (err) {
+    console.error('[Password Reset Store Error]:', err instanceof Error ? err.message : String(err));
+    return res.status(500).json({ error: 'Unable to process the password reset request right now.' });
   }
 
-  // Consistent message to prevent email enumeration
+  const resetUrl = new URL('/reset-password', mailConfig.appUrl);
+  resetUrl.searchParams.set('token', rawToken);
+  const transporter = nodemailer.createTransport({
+    host: mailConfig.host,
+    port: mailConfig.port,
+    secure: mailConfig.secure,
+    auth: { user: mailConfig.user, pass: mailConfig.pass },
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
+  });
+
+  try {
+    await transporter.sendMail({
+      from: mailConfig.from,
+      to: cleanEmail,
+      subject: 'Reset your TheCreators password',
+      text: [
+        'We received a request to reset the password for your TheCreators account.',
+        '',
+        `Use this link within 60 minutes: ${resetUrl.toString()}`,
+        '',
+        'If you did not request a password reset, you can ignore this email.',
+      ].join('\n'),
+      html: [
+        '<p>We received a request to reset the password for your TheCreators account.</p>',
+        `<p><a href="${resetUrl.toString()}">Reset your password</a></p>`,
+        '<p>This link expires in 60 minutes and can only be used once.</p>',
+        '<p>If you did not request a password reset, you can ignore this email.</p>',
+      ].join(''),
+    });
+    logAudit(cleanEmail, 'auth.password_reset_request', 'Reset instructions sent by email');
+  } catch (err) {
+    console.error('[Password Reset Email Error]:', err instanceof Error ? err.message : String(err));
+    try {
+      await query('DELETE FROM password_resets WHERE id = $1', [resetId]);
+    } catch (cleanupError) {
+      console.error(
+        '[Password Reset Cleanup Error]:',
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      );
+    }
+    return res.status(502).json({ error: 'Unable to send password reset email right now. Please try again later.' });
+  } finally {
+    transporter.close();
+  }
+
   return res.json({
     ok: true,
-    message: 'If that email address is registered, password reset instructions have been generated.',
+    message: 'If that email address is registered, password reset instructions have been sent.',
   });
 });
 

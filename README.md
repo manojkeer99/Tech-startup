@@ -80,12 +80,19 @@ Create a local `.env` file as needed. Do not commit credentials or secrets.
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID. |
 | `TURNSTILE_SITE_KEY` | Cloudflare Turnstile public site key. |
 | `TURNSTILE_SECRET_KEY` | Cloudflare Turnstile server-side secret. Configure both keys together. |
+| `SMTP_HOST` | SMTP server hostname used to send password-reset emails. |
+| `SMTP_PORT` | SMTP server port (defaults to `587`; port `465` defaults to secure TLS). |
+| `SMTP_SECURE` | Optional `true`/`false` override for SMTP TLS mode. |
+| `SMTP_USER` / `SMTP_PASS` | SMTP authentication credentials. Keep these server-side and out of source control. |
+| `SMTP_FROM` | Verified sender address/name, for example `TheCreators <no-reply@example.com>`. |
 | `FRONTEND_URL` / `APP_URL` | Additional allowed frontend origins for cross-origin deployments. |
 | `VITE_API_BASE_URL` | Optional API base URL for a separately deployed frontend. |
 | `VITE_BACKEND_URL` | Optional backend URL for the Vite development proxy. |
 | `ADMIN_EMAILS` | Comma-separated email addresses trusted as administrators. |
 
 In development, Turnstile can be omitted. In production, configure it; the server does not allow an unconfigured production bypass. When `DATABASE_URL` is configured and reachable, the server runs the SQL migrations at startup.
+
+Password reset requires a configured PostgreSQL database and SMTP account. Set `FRONTEND_URL` to the public frontend origin so reset links point to the correct site. Reset tokens are stored as hashes, expire after one hour, and are invalidated after use.
 
 ## Build and run
 

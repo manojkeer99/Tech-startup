@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { TcMonogram, IconMail, IconArrow, IconCheck, IconCopy } from '@/components/icons';
+import { TcMonogram, IconMail, IconArrow } from '@/components/icons';
 import { Button, Field, Input } from '@/components/ui';
 import { TurnstileWidget, type TurnstileConfigState } from '@/components/turnstile-widget';
 import { useToast } from '@/components/toast';
@@ -15,8 +15,6 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
   const { t } = useI18n();
   const [email, setEmail] = useState('');
   const [busy, setBusy] = useState(false);
-  const [token, setToken] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const [turnstileResetKey, setTurnstileResetKey] = useState(0);
   const [turnstileConfig, setTurnstileConfig] = useState<TurnstileConfigState>({
@@ -47,14 +45,9 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
         push('error', res.error || 'Failed to generate reset link.');
         return;
       }
-      if (res.token) {
-        setToken(res.token);
-        push('success', 'Password reset token generated successfully.');
-      } else {
-        setTurnstileToken(null);
-        setTurnstileResetKey((k) => k + 1);
-        push('info', 'If that email is registered, a reset link has been dispatched.');
-      }
+      setTurnstileToken(null);
+      setTurnstileResetKey((k) => k + 1);
+      push('info', 'If that email is registered, reset instructions will arrive shortly. Check your inbox and spam folder.');
     } catch {
       setTurnstileToken(null);
       setTurnstileResetKey((k) => k + 1);
@@ -62,18 +55,6 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
     } finally {
       setBusy(false);
     }
-  };
-
-  const resetUrl = token ? `${window.location.origin}/reset-password?token=${token}` : '';
-
-  const copyResetLink = async () => {
-    if (!token) return;
-    try {
-      await navigator.clipboard.writeText(resetUrl);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-      push('info', 'Reset link copied to clipboard.');
-    } catch {}
   };
 
   return (
@@ -109,64 +90,35 @@ export function ForgotPasswordPage({ navigate }: ForgotPasswordPageProps) {
           {t('resetPasswordSubtitle')}
         </p>
 
-        {token ? (
-          <div className="mt-6 space-y-4">
-            <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 p-4 text-xs text-emerald-300">
-              <p className="font-semibold text-emerald-400">Single-Use Reset Token Generated</p>
-              <p className="mt-1 text-[var(--color-muted)]">
-                In production, this link is delivered via SMTP. For this demo environment, click below to test the reset flow immediately:
-              </p>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => navigate(`/reset-password?token=${token}`)}
-              className="btn-grad w-full py-3 rounded-xl font-bold text-white text-sm flex items-center justify-center gap-2 cursor-pointer shadow-md"
-            >
-              <span>Open Reset Password Form</span>
-              <IconArrow className="h-4 w-4" />
-            </button>
-
-            <button
-              type="button"
-              onClick={copyResetLink}
-              className="w-full py-2.5 rounded-xl border border-[var(--color-line)] bg-[var(--color-raise)] text-xs text-[var(--color-ink)] flex items-center justify-center gap-2 hover:border-violet-500/40 transition cursor-pointer"
-            >
-              {copied ? <IconCheck className="h-3.5 w-3.5 text-emerald-400" /> : <IconCopy className="h-3.5 w-3.5" />}
-              <span>{copied ? 'Link Copied!' : 'Copy Direct Token Link'}</span>
-            </button>
-          </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-            <Field label={t('emailAddress')}>
-              <Input
-                type="email"
-                placeholder="you@company.com"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </Field>
-
-            <TurnstileWidget
-              action="forgot_password"
-              resetKey={turnstileResetKey}
-              onVerify={setTurnstileToken}
-              onConfigChange={setTurnstileConfig}
+        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
+          <Field label={t('emailAddress')}>
+            <Input
+              type="email"
+              placeholder="you@company.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
             />
+          </Field>
 
-            <Button
-              type="submit"
-              size="lg"
-              loading={busy}
-              disabled={busy || turnstileConfig.misconfigured || (turnstileConfig.required && !turnstileToken)}
-              className="w-full mt-2"
-            >
-              <span>{t('sendResetLink')}</span>
-              {!busy && <IconArrow className="h-4 w-4" />}
-            </Button>
-          </form>
-        )}
+          <TurnstileWidget
+            action="forgot_password"
+            resetKey={turnstileResetKey}
+            onVerify={setTurnstileToken}
+            onConfigChange={setTurnstileConfig}
+          />
+
+          <Button
+            type="submit"
+            size="lg"
+            loading={busy}
+            disabled={busy || turnstileConfig.misconfigured || (turnstileConfig.required && !turnstileToken)}
+            className="w-full mt-2"
+          >
+            <span>{t('sendResetLink')}</span>
+            {!busy && <IconArrow className="h-4 w-4" />}
+          </Button>
+        </form>
 
         <div className="mt-6 border-t border-[var(--color-line)] pt-5 text-center">
           <button
